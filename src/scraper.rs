@@ -25,11 +25,18 @@ impl Scraper {
             let client = build_http_client(bmc_cfg)?;
             let handle = make_bmc(bmc_cfg, client);
             if bmc_cfg.auth == AuthMethod::Session {
-                establish_session(&handle.bmc, &bmc_cfg.username, bmc_cfg.password.expose())
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("bmc '{}': session establishment failed: {e}", bmc_cfg.name)
-                    })?;
+                let token =
+                    establish_session(&handle.bmc, &bmc_cfg.username, bmc_cfg.password.expose())
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "bmc '{}': session establishment failed: {e}",
+                                bmc_cfg.name
+                            )
+                        })?;
+                handle
+                    .bmc
+                    .set_credentials(nv_redfish::bmc_http::BmcCredentials::token(token));
             }
             bmcs.push(handle);
         }

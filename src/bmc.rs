@@ -56,11 +56,17 @@ pub fn make_bmc(cfg: &BmcConfig, client: ReqwestClient) -> BmcHandle {
     }
 }
 
-pub async fn establish_session(
-    bmc: &Arc<HttpBmc<ReqwestClient>>,
+/// 建立 Redfish 会话并返回会话 token。
+///
+/// 泛型 `<B: nv_redfish::Bmc>`：token 的写回（`HttpBmc::set_credentials`）
+/// 是 `HttpBmc` 特有能力，`nv_redfish::Bmc` trait 无凭据概念，
+/// 故此处返回 token 由调用方应用（scraper.rs），这也使本流程
+/// 可被 MockBmc 全流程测试。
+pub async fn establish_session<B: nv_redfish::Bmc>(
+    bmc: &Arc<B>,
     username: &str,
     password: &str,
-) -> Result<(), BmcError> {
+) -> Result<String, BmcError> {
     let root = nv_redfish::ServiceRoot::new(Arc::clone(bmc))
         .await
         .map_err(|e| BmcError::Session(format!("service root: {e}")))?;
@@ -94,8 +100,5 @@ pub async fn establish_session(
             "session response without auth token".into(),
         ));
     };
-    bmc.set_credentials(nv_redfish::bmc_http::BmcCredentials::token(
-        token.to_string(),
-    ));
-    Ok(())
+    Ok(token.to_string())
 }
