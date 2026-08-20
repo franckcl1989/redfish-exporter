@@ -1,7 +1,7 @@
-use crate::metrics::{Metric, SENSOR_READING, health_state_labels, unbox_reading};
+use crate::collector::status_labels;
+use crate::metrics::{Metric, SENSOR_READING, unbox_reading};
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
-use nv_redfish::schema::resource::Health;
 use nv_redfish::schema::sensor::Sensor;
 use std::sync::Arc;
 
@@ -111,16 +111,7 @@ struct SensorLabels {
 }
 
 fn collect_labels(sensor: &Sensor) -> SensorLabels {
-    let status = sensor.status.as_ref();
-    let health = status
-        .and_then(|s| s.health.as_ref())
-        .and_then(|h| h.as_ref())
-        .map(health_str);
-    let state = status
-        .and_then(|s| s.state.as_ref())
-        .and_then(|h| h.as_ref())
-        .map(|s| format!("{s:?}"));
-    let (health, state) = health_state_labels(health, state.as_deref());
+    let (health, state) = status_labels(sensor.status.as_ref());
     SensorLabels {
         name: sensor.base.id.to_string(),
         units: sensor.reading_units.clone().flatten().unwrap_or_default(),
@@ -132,15 +123,6 @@ fn collect_labels(sensor: &Sensor) -> SensorLabels {
             .unwrap_or_default(),
         health,
         state,
-    }
-}
-
-fn health_str(health: &Health) -> &'static str {
-    match health {
-        Health::Ok => "OK",
-        Health::Warning => "Warning",
-        Health::Critical => "Critical",
-        Health::UnsupportedValue => "UnsupportedValue",
     }
 }
 

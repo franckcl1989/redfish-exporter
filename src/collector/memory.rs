@@ -1,10 +1,7 @@
-use crate::metrics::{
-    HEALTH_STATUS, INFO, MEMORY_BANDWIDTH, MEMORY_CAPACITY, Metric, health_state_labels,
-    unbox_reading,
-};
+use crate::collector::{push_health, push_info, status_labels};
+use crate::metrics::{MEMORY_BANDWIDTH, MEMORY_CAPACITY, Metric, unbox_reading};
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
-use nv_redfish::schema::resource::{Health, Status};
 use std::sync::Arc;
 
 pub async fn collect_memory<B: Bmc>(
@@ -40,7 +37,8 @@ async fn collect_module<B: Bmc>(
 ) {
     let raw = module.raw();
     let id = module.id().to_string();
-    push_health(out, bmc_name, "memory", &id, raw.status.as_ref());
+    let (health, state) = status_labels(raw.status.as_ref());
+    push_health(out, bmc_name, "memory", &id, &health, &state);
     if let Some(value) = raw.manufacturer.clone().flatten() {
         push_info(out, bmc_name, "manufacturer", &value);
     }
@@ -101,54 +99,4 @@ fn push_capacity(
             .label("id", id.to_string())
             .build(capacity_mib as f64 * 1048576.0),
     );
-}
-
-fn push_health(
-    out: &mut Vec<Metric>,
-    bmc_name: &str,
-    resource_type: &str,
-    id: &str,
-    status: Option<&Status>,
-) {
-    let (health, state) = status_labels(status);
-    out.push(
-        Metric::gauge(HEALTH_STATUS.0, HEALTH_STATUS.1)
-            .label("bmc", bmc_name.to_string())
-            .label("resource_type", resource_type.to_string())
-            .label("id", id.to_string())
-            .label("health", health)
-            .label("state", state)
-            .build(1.0),
-    );
-}
-
-fn push_info(out: &mut Vec<Metric>, bmc_name: &str, key: &str, value: &str) {
-    out.push(
-        Metric::gauge(INFO.0, INFO.1)
-            .label("bmc", bmc_name.to_string())
-            .label("key", key.to_string())
-            .label("value", value.to_string())
-            .build(1.0),
-    );
-}
-
-fn status_labels(status: Option<&Status>) -> (String, String) {
-    let health = status
-        .and_then(|s| s.health.as_ref())
-        .and_then(|h| h.as_ref())
-        .map(health_str);
-    let state = status
-        .and_then(|s| s.state.as_ref())
-        .and_then(|h| h.as_ref())
-        .map(|s| format!("{s:?}"));
-    health_state_labels(health, state.as_deref())
-}
-
-fn health_str(health: &Health) -> &'static str {
-    match health {
-        Health::Ok => "OK",
-        Health::Warning => "Warning",
-        Health::Critical => "Critical",
-        Health::UnsupportedValue => "UnsupportedValue",
-    }
 }

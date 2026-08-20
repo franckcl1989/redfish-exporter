@@ -1,10 +1,8 @@
-use crate::metrics::{
-    Metric, POWER_CONSUMPTION, SENSOR_READING, health_state_labels, unbox_reading,
-};
+use crate::collector::status_labels;
+use crate::metrics::{Metric, POWER_CONSUMPTION, SENSOR_READING, unbox_reading};
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
 use nv_redfish::chassis::Chassis;
-use nv_redfish::schema::resource::{Health, Status};
 use nv_redfish::schema::sensor::Sensor;
 use nv_redfish::schema::thermal::Temperature;
 use std::sync::Arc;
@@ -313,27 +311,6 @@ fn sensor_labels(sensor: &Sensor) -> ReadingLabels {
             .unwrap_or_default(),
         health,
         state,
-    }
-}
-
-fn status_labels(status: Option<&Status>) -> (String, String) {
-    let health = status
-        .and_then(|s| s.health.as_ref())
-        .and_then(|h| h.as_ref())
-        .map(health_str);
-    let state = status
-        .and_then(|s| s.state.as_ref())
-        .and_then(|h| h.as_ref())
-        .map(|s| format!("{s:?}"));
-    health_state_labels(health, state.as_deref())
-}
-
-fn health_str(health: &Health) -> &'static str {
-    match health {
-        Health::Ok => "OK",
-        Health::Warning => "Warning",
-        Health::Critical => "Critical",
-        Health::UnsupportedValue => "UnsupportedValue",
     }
 }
 

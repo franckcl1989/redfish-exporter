@@ -1,9 +1,7 @@
-use crate::metrics::{
-    DRIVE_CAPACITY, HEALTH_STATUS, INFO, Metric, VOLUME_CAPACITY, health_state_labels,
-};
+use crate::collector::{push_health, push_info, status_labels};
+use crate::metrics::{DRIVE_CAPACITY, Metric, VOLUME_CAPACITY};
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
-use nv_redfish::schema::resource::{Health, Status};
 use nv_redfish::schema::volume::Volume as VolumeSchema;
 use std::sync::Arc;
 
@@ -99,7 +97,8 @@ async fn collect_drive<B: Bmc>(
 ) {
     let raw = drive.raw();
     let id = drive.id().to_string();
-    push_health(out, bmc_name, "drive", &id, raw.status.as_ref());
+    let (health, state) = status_labels(raw.status.as_ref());
+    push_health(out, bmc_name, "drive", &id, &health, &state);
     if let Some(value) = raw.manufacturer.clone().flatten() {
         push_info(out, bmc_name, "manufacturer", &value);
     }
@@ -202,7 +201,8 @@ fn collect_volume(
     out: &mut Vec<Metric>,
 ) {
     let id = volume.base.id.clone();
-    push_health(out, bmc_name, "volume", &id, volume.status.as_ref());
+    let (health, state) = status_labels(volume.status.as_ref());
+    push_health(out, bmc_name, "volume", &id, &health, &state);
     push_info(out, bmc_name, "name", &volume.base.name.clone());
     push_value(
         out,
@@ -235,54 +235,4 @@ fn push_value(
             .label("id", id.to_string())
             .build(value),
     );
-}
-
-fn push_health(
-    out: &mut Vec<Metric>,
-    bmc_name: &str,
-    resource_type: &str,
-    id: &str,
-    status: Option<&Status>,
-) {
-    let (health, state) = status_labels(status);
-    out.push(
-        Metric::gauge(HEALTH_STATUS.0, HEALTH_STATUS.1)
-            .label("bmc", bmc_name.to_string())
-            .label("resource_type", resource_type.to_string())
-            .label("id", id.to_string())
-            .label("health", health)
-            .label("state", state)
-            .build(1.0),
-    );
-}
-
-fn push_info(out: &mut Vec<Metric>, bmc_name: &str, key: &str, value: &str) {
-    out.push(
-        Metric::gauge(INFO.0, INFO.1)
-            .label("bmc", bmc_name.to_string())
-            .label("key", key.to_string())
-            .label("value", value.to_string())
-            .build(1.0),
-    );
-}
-
-fn status_labels(status: Option<&Status>) -> (String, String) {
-    let health = status
-        .and_then(|s| s.health.as_ref())
-        .and_then(|h| h.as_ref())
-        .map(health_str);
-    let state = status
-        .and_then(|s| s.state.as_ref())
-        .and_then(|h| h.as_ref())
-        .map(|s| format!("{s:?}"));
-    health_state_labels(health, state.as_deref())
-}
-
-fn health_str(health: &Health) -> &'static str {
-    match health {
-        Health::Ok => "OK",
-        Health::Warning => "Warning",
-        Health::Critical => "Critical",
-        Health::UnsupportedValue => "UnsupportedValue",
-    }
 }

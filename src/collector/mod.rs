@@ -4,10 +4,64 @@ pub mod power;
 pub mod processors;
 pub mod sensors;
 pub mod storage;
+pub mod systems;
 
-use crate::metrics::{Metric, SCRAPE_DURATION, UP};
+use crate::metrics::{HEALTH_STATUS, INFO, Metric, SCRAPE_DURATION, UP, health_state_labels};
 use nv_redfish::Bmc;
+use nv_redfish::schema::resource::{Health, Status};
 use std::sync::Arc;
+
+pub(crate) fn health_wire(health: &Health) -> &'static str {
+    match health {
+        Health::Ok => "OK",
+        Health::Warning => "Warning",
+        Health::Critical => "Critical",
+        Health::UnsupportedValue => "UnsupportedValue",
+    }
+}
+
+pub(crate) fn status_labels(status: Option<&Status>) -> (String, String) {
+    let health = status
+        .and_then(|s| s.health.as_ref())
+        .and_then(|h| h.as_ref())
+        .map(health_wire);
+    let state = status
+        .and_then(|s| s.state.as_ref())
+        .and_then(|h| h.as_ref())
+        .map(|s| format!("{s:?}"));
+    health_state_labels(health, state.as_deref())
+}
+
+pub(crate) fn push_health(
+    out: &mut Vec<Metric>,
+    bmc: &str,
+    resource_type: &str,
+    id: &str,
+    health: &str,
+    state: &str,
+) {
+    let health = if health.is_empty() { "unknown" } else { health };
+    let state = if state.is_empty() { "unknown" } else { state };
+    out.push(
+        Metric::gauge(HEALTH_STATUS.0, HEALTH_STATUS.1)
+            .label("bmc", bmc.to_string())
+            .label("resource_type", resource_type.to_string())
+            .label("id", id.to_string())
+            .label("health", health.to_string())
+            .label("state", state.to_string())
+            .build(1.0),
+    );
+}
+
+pub(crate) fn push_info(out: &mut Vec<Metric>, bmc: &str, key: &str, value: &str) {
+    out.push(
+        Metric::gauge(INFO.0, INFO.1)
+            .label("bmc", bmc.to_string())
+            .label("key", key.to_string())
+            .label("value", value.to_string())
+            .build(1.0),
+    );
+}
 
 pub struct ScrapeReport {
     pub metrics: Vec<Metric>,
@@ -47,7 +101,26 @@ pub async fn collect_all<B: Bmc>(
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    // Task 9 在此挂接其余 collector
+    match systems::collect_systems(Arc::clone(&bmc), &root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
+    match systems::collect_chassis_health(Arc::clone(&bmc), &root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
+    match systems::collect_managers(Arc::clone(&bmc), &root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
+    match systems::collect_assembly(Arc::clone(&bmc), &root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
+    match systems::collect_firmware(Arc::clone(&bmc), &root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
 
     let up = if failed_resources.is_empty() {
         1.0

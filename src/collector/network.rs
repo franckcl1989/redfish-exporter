@@ -1,10 +1,10 @@
-use crate::metrics::{HEALTH_STATUS, INFO, LINK_SPEED, LINK_STATUS, Metric, health_state_labels};
+use crate::collector::{push_health, push_info, status_labels};
+use crate::metrics::{LINK_SPEED, LINK_STATUS, Metric};
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
 use nv_redfish::chassis::NetworkAdapter;
 use nv_redfish::ethernet_interface::{EthernetInterface, LinkStatus};
 use nv_redfish::pcie_device::PcieDevice;
-use nv_redfish::schema::resource::{Health, Status};
 use std::sync::Arc;
 
 const PCIE_DEVICE_LANES_IN_USE: (&str, &str) = (
@@ -62,13 +62,8 @@ fn collect_ethernet_interface<B: Bmc>(
 ) {
     let raw = interface.raw();
     let id = interface.id().to_string();
-    push_health(
-        out,
-        bmc_name,
-        "ethernet_interface",
-        &id,
-        raw.status.as_ref(),
-    );
+    let (health, state) = status_labels(raw.status.as_ref());
+    push_health(out, bmc_name, "ethernet_interface", &id, &health, &state);
     if let Some(mac) = interface.mac_address() {
         push_info(out, bmc_name, "mac_address", &mac.to_string());
     }
@@ -132,7 +127,8 @@ async fn collect_network_adapter<B: Bmc>(
 ) {
     let raw = adapter.raw();
     let id = adapter.id().to_string();
-    push_health(out, bmc_name, "network_adapter", &id, raw.status.as_ref());
+    let (health, state) = status_labels(raw.status.as_ref());
+    push_health(out, bmc_name, "network_adapter", &id, &health, &state);
     if let Some(value) = raw.manufacturer.clone().flatten() {
         push_info(out, bmc_name, "manufacturer", &value);
     }
@@ -156,14 +152,16 @@ async fn collect_network_adapter<B: Bmc>(
     for port in ports {
         let raw = port.raw();
         let port_id = port.id().to_string();
-        push_health(out, bmc_name, "port", &port_id, raw.status.as_ref());
+        let (health, state) = status_labels(raw.status.as_ref());
+        push_health(out, bmc_name, "port", &port_id, &health, &state);
     }
 }
 
 fn collect_pcie_device<B: Bmc>(bmc_name: &str, device: &PcieDevice<B>, out: &mut Vec<Metric>) {
     let raw = device.raw();
     let id = device.id().to_string();
-    push_health(out, bmc_name, "pcie_device", &id, raw.status.as_ref());
+    let (health, state) = status_labels(raw.status.as_ref());
+    push_health(out, bmc_name, "pcie_device", &id, &health, &state);
     if let Some(value) = raw.manufacturer.clone().flatten() {
         push_info(out, bmc_name, "manufacturer", &value);
     }
@@ -231,54 +229,4 @@ fn push_device_value(
             .label("id", id.to_string())
             .build(value),
     );
-}
-
-fn push_health(
-    out: &mut Vec<Metric>,
-    bmc_name: &str,
-    resource_type: &str,
-    id: &str,
-    status: Option<&Status>,
-) {
-    let (health, state) = status_labels(status);
-    out.push(
-        Metric::gauge(HEALTH_STATUS.0, HEALTH_STATUS.1)
-            .label("bmc", bmc_name.to_string())
-            .label("resource_type", resource_type.to_string())
-            .label("id", id.to_string())
-            .label("health", health)
-            .label("state", state)
-            .build(1.0),
-    );
-}
-
-fn push_info(out: &mut Vec<Metric>, bmc_name: &str, key: &str, value: &str) {
-    out.push(
-        Metric::gauge(INFO.0, INFO.1)
-            .label("bmc", bmc_name.to_string())
-            .label("key", key.to_string())
-            .label("value", value.to_string())
-            .build(1.0),
-    );
-}
-
-fn status_labels(status: Option<&Status>) -> (String, String) {
-    let health = status
-        .and_then(|s| s.health.as_ref())
-        .and_then(|h| h.as_ref())
-        .map(health_str);
-    let state = status
-        .and_then(|s| s.state.as_ref())
-        .and_then(|h| h.as_ref())
-        .map(|s| format!("{s:?}"));
-    health_state_labels(health, state.as_deref())
-}
-
-fn health_str(health: &Health) -> &'static str {
-    match health {
-        Health::Ok => "OK",
-        Health::Warning => "Warning",
-        Health::Critical => "Critical",
-        Health::UnsupportedValue => "UnsupportedValue",
-    }
 }
