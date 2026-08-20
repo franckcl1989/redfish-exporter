@@ -27,3 +27,10 @@ fn make_bmc_wraps_name() {
     let handle = make_bmc(&cfg(), client);
     assert_eq!(handle.name, "bmc1");
 }
+
+#[test]
+fn rejects_missing_ca_file() {
+    let mut c = cfg();
+    c.ca_cert_file = Some("C:\\nonexistent\\ca.pem".into());
+    assert!(build_http_client(&c).is_err());
+}

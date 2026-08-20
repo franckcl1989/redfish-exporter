@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -9,7 +10,7 @@ pub type HttpBmc<C> = nv_redfish::bmc_http::HttpBmc<C>;
 #[derive(Debug, Error)]
 pub enum BmcError {
     #[error("failed to build http client for bmc: {0}")]
-    Transport(#[source] anyhow::Error),
+    Transport(#[from] anyhow::Error),
     #[error("session establishment failed: {0}")]
     Session(String),
 }
@@ -20,9 +21,17 @@ pub struct BmcHandle {
 }
 
 pub fn build_http_client(cfg: &BmcConfig) -> Result<ReqwestClient, BmcError> {
-    let params = nv_redfish::bmc_http::reqwest::ClientParams::default()
-        .accept_invalid_certs(cfg.insecure_skip_verify);
-    ReqwestClient::with_params(params).map_err(|e| BmcError::Transport(anyhow::Error::new(e)))
+    let mut builder =
+        reqwest::Client::builder().danger_accept_invalid_certs(cfg.insecure_skip_verify);
+    if let Some(ca) = &cfg.ca_cert_file {
+        let pem =
+            std::fs::read(ca).with_context(|| format!("read ca_cert_file '{}'", ca.display()))?;
+        let cert = reqwest::Certificate::from_pem(&pem)
+            .with_context(|| format!("parse ca_cert_file '{}'", ca.display()))?;
+        builder = builder.add_root_certificate(cert);
+    }
+    let client = builder.build().map_err(anyhow::Error::new)?;
+    Ok(nv_redfish::bmc_http::reqwest::Client::with_client(client))
 }
 
 pub fn make_bmc(cfg: &BmcConfig, client: ReqwestClient) -> BmcHandle {
