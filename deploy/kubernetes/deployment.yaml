@@ -1,0 +1,118 @@
+# redfish-exporter Kubernetes deployment example.
+# Apply with: kubectl apply -f deploy/kubernetes/deployment.yaml
+#
+# NOTE: the example below keeps BMC credentials in a ConfigMap for simplicity.
+# For production, store the password in a Secret and mount it instead, e.g.:
+#
+#   apiVersion: v1
+#   kind: Secret
+#   metadata:
+#     name: redfish-exporter-config
+#   stringData:
+#     config.yaml: |
+#       bmcs:
+#         - name: bmc1
+#           host: https://10.0.0.1
+#           username: admin
+#           password: <real-password>
+#   ---
+#   ... then mount secretName: redfish-exporter-config at /etc/redfish-exporter
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redfish-exporter-config
+  labels:
+    app: redfish-exporter
+data:
+  config.yaml: |
+    listen_addr: "0.0.0.0:9417"
+    scrape_interval: "30s"
+    scrape_timeout: "15s"
+    request_timeout: "10s"
+    bmcs:
+      - name: bmc1
+        host: https://10.0.0.1
+        username: admin
+        password: change-me
+        auth: basic
+        insecure_skip_verify: false
+        ca_cert_file: null
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redfish-exporter
+  labels:
+    app: redfish-exporter
+spec:
+  selector:
+    app: redfish-exporter
+  ports:
+    - name: metrics
+      port: 9417
+      targetPort: 9417
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redfish-exporter
+  labels:
+    app: redfish-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redfish-exporter
+  template:
+    metadata:
+      labels:
+        app: redfish-exporter
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: redfish-exporter
+          image: ghcr.io/your-org/redfish-exporter:0.1.0
+          args:
+            - "-c"
+            - "/etc/redfish-exporter/config.yaml"
+          ports:
+            - name: metrics
+              containerPort: 9417
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9417
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9417
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          volumeMounts:
+            - name: config
+              mountPath: /etc/redfish-exporter
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: redfish-exporter-config

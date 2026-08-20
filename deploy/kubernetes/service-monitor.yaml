@@ -1,0 +1,17 @@
+# Prometheus-operator ServiceMonitor for redfish-exporter.
+# Requires the prometheus-operator stack (monitoring.coreos.com CRDs).
+# Apply with: kubectl apply -f deploy/kubernetes/service-monitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redfish-exporter
+  labels:
+    app: redfish-exporter
+spec:
+  selector:
+    matchLabels:
+      app: redfish-exporter
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics

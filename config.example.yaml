@@ -1,0 +1,13 @@
+# redfish-exporter configuration example
+listen_addr: "0.0.0.0:9417"   # HTTP listen address (default 0.0.0.0:9417)
+scrape_interval: "30s"         # periodic scrape interval (default 30s)
+scrape_timeout: "15s"          # per-round deadline (default 15s)
+request_timeout: "10s"         # per-request timeout (default 10s)
+bmcs:
+  - name: bmc1                 # unique, used as the `bmc` metric label
+    host: https://10.0.0.1     # http:// or https://
+    username: admin
+    password: "change-me"
+    auth: basic                # basic | session (session creates an X-Auth-Token)
+    insecure_skip_verify: false  # WARNING: only for self-signed BMC certs, TLS verification disabled
+    ca_cert_file: null         # optional PEM CA bundle for self-signed BMCs
