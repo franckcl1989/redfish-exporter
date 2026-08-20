@@ -1,0 +1,13 @@
+# Test fixture for the 0.1.0 smoke test (Task 15).
+# Points at TEST-NET-1 (192.0.2.1), which is unreachable by design:
+# the exporter must stay up and report redfish_up{bmc="unreachable"} 0.
+listen_addr: "127.0.0.1:19417"   # non-default port to avoid conflicts
+scrape_interval: "5s"
+scrape_timeout: "2s"
+request_timeout: "1s"
+bmcs:
+  - name: unreachable
+    host: https://192.0.2.1      # TEST-NET-1 unreachable address
+    username: admin
+    password: "test-password"
+    auth: basic
