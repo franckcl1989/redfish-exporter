@@ -1,4 +1,5 @@
 pub mod memory;
+pub mod network;
 pub mod power;
 pub mod processors;
 pub mod sensors;
@@ -42,7 +43,11 @@ pub async fn collect_all<B: Bmc>(
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    // Task 8-9 在此挂接其余 collector
+    match network::collect_network(Arc::clone(&bmc), &root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
+    // Task 9 在此挂接其余 collector
 
     let up = if failed_resources.is_empty() {
         1.0
