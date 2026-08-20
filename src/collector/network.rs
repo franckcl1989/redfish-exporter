@@ -143,17 +143,15 @@ async fn collect_network_adapter<B: Bmc>(
     {
         push_info(out, bmc_name, "firmware_version", &value);
     }
-    let Ok(Some(ports)) = adapter.ports().await else {
-        return;
-    };
-    let Ok(ports) = ports.members().await else {
-        return;
-    };
-    for port in ports {
-        let raw = port.raw();
-        let port_id = port.id().to_string();
-        let (health, state) = status_labels(raw.status.as_ref());
-        push_health(out, bmc_name, "port", &port_id, &health, &state);
+    if let Ok(Some(ports)) = adapter.ports().await
+        && let Ok(ports) = ports.members().await
+    {
+        for port in ports {
+            let raw = port.raw();
+            let port_id = port.id().to_string();
+            let (health, state) = status_labels(raw.status.as_ref());
+            push_health(out, bmc_name, "port", &port_id, &health, &state);
+        }
     }
 }
 

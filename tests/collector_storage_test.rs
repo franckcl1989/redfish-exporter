@@ -288,3 +288,47 @@ async fn no_storage_is_ok() {
     let metrics = collect_storage(bmc, &root, "bmc1").await.unwrap();
     assert!(metrics.is_empty());
 }
+
+#[tokio::test]
+async fn drives_failure_does_not_block_volumes() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, true);
+    expect_storage_collection(&bmc);
+    expect_storage(&bmc, true, true);
+    // drive GET 命中但响应为错误 → drives() 返回 Err；
+    // volumes 采集不受影响。
+    bmc.expect(nv_redfish_bmc_mock::Expect {
+        request: nv_redfish_bmc_mock::ExpectedRequest::Get {
+            id: "/redfish/v1/Systems/1/Storage/SATA1/Drives/HDD1"
+                .to_string()
+                .into(),
+        },
+        response: Err(serde_json::from_str::<serde_json::Value>("").unwrap_err()),
+    });
+    expect_volume_collection(&bmc);
+    expect_volume(&bmc);
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_storage(bmc, &root, "bmc1").await.unwrap();
+
+    assert!(
+        metrics
+            .iter()
+            .any(|m| m.name == "redfish_volume_capacity_bytes" && m.value == 2048.0),
+        "volume metrics must still be produced"
+    );
+    assert!(
+        metrics.iter().any(|m| m.name == "redfish_health_status"
+            && m.value == 1.0
+            && labels_of(m).get("resource_type") == Some(&"volume")),
+        "volume health must still be produced"
+    );
+    assert!(
+        !metrics
+            .iter()
+            .any(|m| m.name == "redfish_drive_capacity_bytes"),
+        "drive metrics must be skipped when drives() fails"
+    );
+}

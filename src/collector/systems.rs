@@ -185,14 +185,13 @@ pub async fn collect_firmware<B: Bmc>(
     else {
         return Ok(out);
     };
-    let Some(firmwares) = update_service
+    if let Some(firmwares) = update_service
         .firmware_inventories()
         .await
         .map_err(|e| format!("firmware inventories: {e}"))?
-    else {
-        return Ok(out);
-    };
-    collect_inventory_items(&mut out, bmc_name, "firmware_version", &firmwares);
+    {
+        collect_inventory_items(&mut out, bmc_name, "firmware_version", &firmwares);
+    }
     let Some(softwares) = update_service
         .software_inventories()
         .await

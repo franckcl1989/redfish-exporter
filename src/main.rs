@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Parser;
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 use redfish_exporter::config;
@@ -56,16 +56,27 @@ async fn main() -> anyhow::Result<()> {
     let serve_result = tokio::select! {
         result = &mut serve_fut => result,
         scraper_result = &mut scraper_handle => {
-            if scraper_result.is_err() {
-                warn!("scraper task panicked or aborted");
+            // 正常 shutdown 时 stop 信号已发出，scraper 正常 break（Ok），
+            // 此时与 shutdown 分支竞争触发本分支：仅记 debug。
+            match scraper_result {
+                Ok(()) => {
+                    debug!("scraper task ended without stop signal");
+                    let _ = stop_tx.send(true);
+                    serve_fut.await
+                }
+                Err(e) => {
+                    error!(error = %e, "scraper task panicked or aborted");
+                    std::process::exit(1);
+                }
             }
-            warn!("scraper exited unexpectedly, shutting down");
-            let _ = stop_tx.send(true);
-            serve_fut.await
         }
         _ = &mut shutdown => {
-            let _ = tokio::join!(&mut serve_fut, &mut scraper_handle);
-            Ok(())
+            let (serve_result, scraper_result) = tokio::join!(&mut serve_fut, &mut scraper_handle);
+            if let Err(e) = scraper_result {
+                error!(error = %e, "scraper task panicked or aborted");
+                std::process::exit(1);
+            }
+            serve_result
         }
     };
     serve_result?;

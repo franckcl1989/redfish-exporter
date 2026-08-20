@@ -8,6 +8,7 @@ use std::{
 use thiserror::Error;
 use url::Url;
 
+#[derive(Clone)]
 pub struct SecretString(String);
 impl SecretString {
     pub fn new(s: String) -> Self {

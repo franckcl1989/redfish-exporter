@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
-use crate::config::BmcConfig;
+use crate::config::{AuthMethod, BmcConfig, SecretString};
 
 pub type ReqwestClient = nv_redfish::bmc_http::reqwest::Client;
 pub type HttpBmc<C> = nv_redfish::bmc_http::HttpBmc<C>;
@@ -19,6 +19,24 @@ pub enum BmcError {
 pub struct BmcHandle {
     pub name: String,
     pub bmc: Arc<HttpBmc<ReqwestClient>>,
+    pub username: String,
+    pub password: SecretString,
+    pub auth: AuthMethod,
+}
+
+/// 判断采集错误是否由 401 未授权引起（session token 过期等场景）。
+///
+/// nv-redfish-bmc-http 0.15.1 中非 2xx 响应统一映射为
+/// `BmcError::InvalidResponse { status, .. }`（reqwest.rs:729-735），
+/// 传输层错误才是 `BmcError::ReqwestError`，故此处匹配 InvalidResponse。
+pub fn is_unauthorized(err: &nv_redfish::Error<HttpBmc<ReqwestClient>>) -> bool {
+    matches!(
+        err,
+        nv_redfish::Error::Bmc(nv_redfish::bmc_http::reqwest::BmcError::InvalidResponse {
+            status,
+            ..
+        }) if *status == reqwest::StatusCode::UNAUTHORIZED
+    )
 }
 
 pub fn build_http_client(
@@ -57,6 +75,9 @@ pub fn make_bmc(cfg: &BmcConfig, client: ReqwestClient) -> BmcHandle {
     BmcHandle {
         name: cfg.name.clone(),
         bmc: Arc::new(bmc),
+        username: cfg.username.clone(),
+        password: cfg.password.clone(),
+        auth: cfg.auth,
     }
 }
 

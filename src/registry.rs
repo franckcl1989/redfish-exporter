@@ -1,11 +1,13 @@
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::collector::ScrapeReport;
 use crate::metrics::{Metric, MetricsError, SCRAPE_ERROR, UP, register_into};
 
-/// 指标快照：RwLock 内仅存 Arc 指针，update 是原子替换，读取不克隆底层 registry。
+/// 指标快照：RwLock 内为每个 BMC 各存一个 Arc 指针，update 按 BMC 名
+/// 插入/替换，读取不克隆底层 registry。
 pub struct Snapshot {
-    inner: RwLock<Option<Arc<prometheus::Registry>>>,
+    inner: RwLock<HashMap<String, Arc<prometheus::Registry>>>,
 }
 
 impl Default for Snapshot {
@@ -17,18 +19,46 @@ impl Default for Snapshot {
 impl Snapshot {
     pub fn new() -> Self {
         Snapshot {
-            inner: RwLock::new(None),
+            inner: RwLock::new(HashMap::new()),
         }
     }
 
-    /// 原子替换快照内容。
-    pub fn update(&self, registry: Arc<prometheus::Registry>) {
-        *self.inner.write().expect("snapshot rwlock poisoned") = Some(registry);
+    /// 插入或替换指定 BMC 的快照 registry（原子，按 BMC 隔离）。
+    pub fn update(&self, bmc_name: &str, registry: Arc<prometheus::Registry>) {
+        self.inner
+            .write()
+            .expect("snapshot rwlock poisoned")
+            .insert(bmc_name.to_string(), registry);
     }
 
-    /// 读取当前快照；从未采集过时为 None。
-    pub fn registry(&self) -> Option<Arc<prometheus::Registry>> {
-        self.inner.read().expect("snapshot rwlock poisoned").clone()
+    /// 读取指定 BMC 的快照；该 BMC 从未采集过时为 None。
+    pub fn registry(&self, bmc_name: &str) -> Option<Arc<prometheus::Registry>> {
+        self.inner
+            .read()
+            .expect("snapshot rwlock poisoned")
+            .get(bmc_name)
+            .cloned()
+    }
+
+    /// 没有任何 BMC 的快照时返回 true（/metrics 据此返回 no-data-yet）。
+    pub fn is_empty(&self) -> bool {
+        self.inner
+            .read()
+            .expect("snapshot rwlock poisoned")
+            .is_empty()
+    }
+
+    /// 所有 BMC 的 (name, registry) 快照对，按 BMC 名排序保证输出确定性。
+    pub fn registries(&self) -> Vec<(String, Arc<prometheus::Registry>)> {
+        let mut pairs: Vec<_> = self
+            .inner
+            .read()
+            .expect("snapshot rwlock poisoned")
+            .iter()
+            .map(|(name, reg)| (name.clone(), Arc::clone(reg)))
+            .collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        pairs
     }
 }
 

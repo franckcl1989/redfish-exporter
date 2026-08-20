@@ -24,7 +24,7 @@ async fn metrics_endpoint_returns_cached_snapshot() {
     )
     .await
     .unwrap();
-    snap.update(reg);
+    snap.update("bmc1", reg);
     let resp = router(snap)
         .oneshot(
             Request::builder()
@@ -45,6 +45,60 @@ async fn metrics_endpoint_returns_cached_snapshot() {
     )
     .unwrap();
     assert!(body.contains("redfish_up"));
+}
+
+#[tokio::test]
+async fn two_bmcs_both_served() {
+    let snap = Arc::new(Snapshot::new());
+    let reg1 = redfish_exporter::registry::build_registry(
+        "bmc1",
+        &ScrapeReport {
+            metrics: vec![
+                Metric::gauge("redfish_up", "up")
+                    .label("bmc", "bmc1".into())
+                    .build(1.0),
+            ],
+            failed_resources: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    let reg2 = redfish_exporter::registry::build_registry(
+        "bmc2",
+        &ScrapeReport {
+            metrics: vec![
+                Metric::gauge("redfish_up", "up")
+                    .label("bmc", "bmc2".into())
+                    .build(1.0),
+            ],
+            failed_resources: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    snap.update("bmc1", reg1);
+    snap.update("bmc2", reg2);
+    let resp = router(snap)
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("redfish_up{bmc=\"bmc1\"} 1"), "{body}");
+    assert!(body.contains("redfish_up{bmc=\"bmc2\"} 1"), "{body}");
 }
 
 #[tokio::test]

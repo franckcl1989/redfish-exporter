@@ -20,14 +20,14 @@ Design overview of redfish-exporter 0.1.0 (Rust, nv-redfish 0.15.1).
         |  BMC (collect_all)        |                 |  GET /healthz            |
         |  round deadline =         |                 +-------------+-------------+
         |  scrape_timeout           |                               |
-        |  build_registry per BMC   |                               | snapshot.registry()
+        |  build_registry per BMC   |                               | snapshot.registries()
         +-------------+-------------+                               |
-                      | snapshot.update(Arc<Registry>)             |
+                      | snapshot.update(name, Arc<Registry>)        |
                       v                                             |
         +---------------------------+                               |
-        |        registry.rs        |  RwLock<Option<Arc<Registry>>>|
-        |  Snapshot (atomic swap)   |<------------------------------+
-        +---------------------------+
+        |        registry.rs        |  RwLock<HashMap<String,      |
+        |  Snapshot (per-BMC swap)  |   Arc<Registry>>>             |
+        +---------------------------+<------------------------------+
 ```
 
 Per-BMC scrape pipeline (each collector in `src/collector/`):
@@ -53,16 +53,16 @@ ServiceRoot
 | `collector/*.rs` | Fetch Redfish resources through nv-redfish and convert them into `Metric` values; one module per resource family |
 | `collector/mod.rs` | `collect_all`: orchestrates every collector against one BMC, aggregates metrics and `failed_resources`; shared `push_health` / `push_info` helpers |
 | `scraper.rs` | Periodic loop; spawns one task per BMC (`JoinSet`); enforces the round deadline; builds per-BMC registries and publishes them to the snapshot |
-| `registry.rs` | `Snapshot`: `RwLock<Option<Arc<Registry>>>` with atomic replacement; adds `redfish_scrape_error` series and `redfish_up=0` for failed resources |
-| `http.rs` | axum router serving `/metrics` (encoded snapshot) and `/healthz`; graceful shutdown |
+| `registry.rs` | `Snapshot`: `RwLock<HashMap<String, Arc<Registry>>>` keyed by BMC name with per-BMC atomic replacement; adds `redfish_scrape_error` series and `redfish_up=0` for failed resources |
+| `http.rs` | axum router serving `/metrics` (per-BMC snapshots concatenated in BMC-name order) and `/healthz`; graceful shutdown |
 | `main.rs` | CLI parsing, wiring, signal handling, exit codes |
 
 ## Data flow and error model
 
-- **BMC-level isolation**: each round, every BMC is scraped in its own `JoinSet` task producing its own `Result`. A failing BMC (auth error, unreachable host, …) yields `redfish_up{bmc}=0` and does not affect other BMCs. A BMC that never produced a snapshot is simply absent from `/metrics` (with `x-redfish-exporter: no-data-yet` header).
-- **Resource-level isolation**: a failing collector does not abort the whole BMC. It records the failing resource in `failed_resources`, which produces `redfish_scrape_error{bmc,resource}=1`, forces `redfish_up{bmc}=0` (applied in `registry.rs`), while the metrics of all other resources are still published.
-- **Round deadline**: the whole round is wrapped in `tokio::time::timeout(scrape_timeout)`; on expiry the remaining tasks are aborted (`JoinSet::shutdown`) and the round is logged as timed out.
-- **Snapshot consistency**: the registry per BMC is built fresh each round and swapped in atomically, so `/metrics` always returns one consistent snapshot and never a partially-written one.
+- **BMC-level isolation**: each round, every BMC is scraped in its own `JoinSet` task producing its own `Result`. A failing BMC (auth error, unreachable host, …) yields `redfish_up{bmc}=0` and does not affect other BMCs. A BMC that never produced a snapshot is simply absent from `/metrics` (with `x-redfish-exporter: no-data-yet` header when no BMC has ever produced one). Multi-BMC: each BMC's registry is published independently under its own name and `/metrics` concatenates all of them sorted by BMC name, so every BMC keeps being served as long as it completed at least one round.
+- **Resource-level isolation**: a failing collector does not abort the whole BMC. It records the failing resource in `failed_resources`, which produces `redfish_scrape_error{bmc,resource}=1`, forces `redfish_up{bmc}=0` (applied in `registry.rs`), while the metrics of all other resources are still published. Sub-resource fetches inside a collector (sensor links, drives, volumes, ports) follow the same rule: a failed fetch skips that sub-resource only, and the collector returns `Err` only when *all* of a sub-resource group failed (e.g. all sensor links of a chassis).
+- **Round deadline**: the whole round is wrapped in `tokio::time::timeout(scrape_timeout)`; on expiry the remaining tasks are aborted (`JoinSet::shutdown`) and the round is logged as timed out. BMCs that already completed keep their snapshots — there is no rollback; aborted BMCs retain their previous round's snapshot until a later round succeeds.
+- **Snapshot consistency**: the registry per BMC is built fresh each round and swapped in atomically, so `/metrics` always returns one consistent snapshot per BMC and never a partially-written one.
 
 ## Known design trade-off (Ruling 7c)
 
@@ -81,12 +81,12 @@ main
   └─ join both -> "shutdown complete" -> exit code 0
 ```
 
-If the scraper task panics/aborts unexpectedly, main sends the stop signal and shuts the server down rather than serving stale data.
+If the scraper task panics/aborts unexpectedly, main logs the JoinError and exits with code 1 (fail-fast rather than serving stale data). A normal stop-signal shutdown is the only path that exits 0.
 
 ## Authentication flow
 
 - `basic`: `BmcCredentials::username_password` is baked into the `HttpBmc`; every request carries HTTP Basic credentials.
-- `session`: at startup, `bmc.rs::establish_session` (generic over `B: nv_redfish::Bmc`, so the flow is testable with the mock BMC) walks `ServiceRoot -> SessionService -> Sessions`, POSTs a `SessionCreate`, extracts `X-Auth-Token`, and the caller applies it via `HttpBmc::set_credentials(BmcCredentials::token(...))`. All subsequent requests use the token. Session expiry/refresh is out of scope for 0.1.0 (restart re-establishes).
+- `session`: at startup, `bmc.rs::establish_session` (generic over `B: nv_redfish::Bmc`, so the flow is testable with the mock BMC) walks `ServiceRoot -> SessionService -> Sessions`, POSTs a `SessionCreate`, extracts `X-Auth-Token`, and the caller applies it via `HttpBmc::set_credentials(BmcCredentials::token(...))`. All subsequent requests use the token. On a `401` during a round (`bmc.rs::is_unauthorized` matches `BmcError::InvalidResponse { status: 401, .. }`), the scraper re-establishes the session once (same flow as startup) and retries `collect_all` once for that BMC; if re-establishment or the retry fails, the round is treated as failed (`redfish_up=0`). Credentials are never logged — re-auth log lines carry only the BMC name and error. Basic-auth BMCs never re-login (Basic has no session to refresh).
 
 ## Config validation rules
 

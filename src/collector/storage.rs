@@ -66,24 +66,23 @@ async fn collect_storage_controller<B: Bmc>(
     let raw = storage.raw();
     let storage_id = storage.id().to_string();
 
-    let Ok(Some(drives)) = storage.drives().await else {
-        return;
-    };
-    for drive in drives {
-        collect_drive(bmc, bmc_name, system_id, &storage_id, &drive, out).await;
+    // drives 获取失败时跳过该子资源，不阻止 volumes 采集
+    if let Ok(Some(drives)) = storage.drives().await {
+        for drive in drives {
+            collect_drive(bmc, bmc_name, system_id, &storage_id, &drive, out).await;
+        }
     }
 
     let Some(volumes_nav) = &raw.volumes else {
         return;
     };
-    let Ok(collection) = volumes_nav.get(bmc).await else {
-        return;
-    };
-    for volume_ref in &collection.members {
-        let Ok(volume) = volume_ref.get(bmc).await else {
-            continue;
-        };
-        collect_volume(bmc_name, system_id, &storage_id, &volume, out);
+    if let Ok(collection) = volumes_nav.get(bmc).await {
+        for volume_ref in &collection.members {
+            let Ok(volume) = volume_ref.get(bmc).await else {
+                continue;
+            };
+            collect_volume(bmc_name, system_id, &storage_id, &volume, out);
+        }
     }
 }
 

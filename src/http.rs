@@ -25,22 +25,26 @@ pub fn router(snapshot: Arc<Snapshot>) -> Router {
 }
 
 async fn metrics_handler(State(snapshot): State<Arc<Snapshot>>) -> Response {
-    match snapshot.registry() {
-        Some(registry) => (
-            StatusCode::OK,
-            [(CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],
-            encode(&registry),
-        )
-            .into_response(),
-        None => {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                HeaderName::from_static("x-redfish-exporter"),
-                HeaderValue::from_static("no-data-yet"),
-            );
-            (StatusCode::OK, headers, "").into_response()
-        }
+    if snapshot.is_empty() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-redfish-exporter"),
+            HeaderValue::from_static("no-data-yet"),
+        );
+        return (StatusCode::OK, headers, "").into_response();
     }
+    // TextEncoder 输出以换行结尾，各 BMC 快照直接拼接；
+    // registries() 按 BMC 名排序，保证输出确定性。
+    let mut body = String::new();
+    for (_, registry) in snapshot.registries() {
+        body.push_str(&encode(&registry));
+    }
+    (
+        StatusCode::OK,
+        [(CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],
+        body,
+    )
+        .into_response()
 }
 
 async fn healthz_handler() -> &'static str {

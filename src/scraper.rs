@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::bmc::{BmcHandle, build_http_client, establish_session, make_bmc};
+use crate::bmc::{BmcHandle, build_http_client, establish_session, is_unauthorized, make_bmc};
 use crate::collector::{ScrapeReport, collect_all};
 use crate::config::{AuthMethod, Config};
 use crate::metrics::{Metric, UP};
@@ -70,8 +70,34 @@ impl Scraper {
         for handle in &self.bmcs {
             let name = handle.name.clone();
             let bmc = Arc::clone(&handle.bmc);
+            let username = handle.username.clone();
+            let password = handle.password.clone();
+            let auth = handle.auth;
             set.spawn(async move {
-                let result = collect_all(bmc, &name).await;
+                let result = match collect_all(Arc::clone(&bmc), &name).await {
+                    Ok(report) => Ok(report),
+                    Err(err) if auth == AuthMethod::Session && is_unauthorized(&err) => {
+                        info!(bmc = %name, "session rejected with 401, re-establishing session");
+                        match establish_session(&bmc, &username, password.expose()).await {
+                            Ok(token) => {
+                                bmc.set_credentials(nv_redfish::bmc_http::BmcCredentials::token(
+                                    token,
+                                ));
+                                info!(bmc = %name, "session re-established, retrying scrape");
+                                collect_all(Arc::clone(&bmc), &name).await
+                            }
+                            Err(e) => {
+                                warn!(
+                                    bmc = %name,
+                                    error = %e,
+                                    "session re-establishment failed"
+                                );
+                                Err(err)
+                            }
+                        }
+                    }
+                    Err(err) => Err(err),
+                };
                 (name, result)
             });
         }
@@ -80,7 +106,7 @@ impl Scraper {
                 match res {
                     Ok((name, Ok(report))) => match build_registry(&name, &report).await {
                         Ok(reg) => {
-                            self.snapshot.update(reg);
+                            self.snapshot.update(&name, reg);
                             info!(
                                 bmc = %name,
                                 failed = report.failed_resources.len(),
@@ -101,7 +127,7 @@ impl Scraper {
                             failed_resources: vec!["bmc".to_string()],
                         };
                         match build_registry(&name, &report).await {
-                            Ok(reg) => self.snapshot.update(reg),
+                            Ok(reg) => self.snapshot.update(&name, reg),
                             Err(e) => {
                                 warn!(bmc = %name, error = %e, "failed to build registry");
                             }

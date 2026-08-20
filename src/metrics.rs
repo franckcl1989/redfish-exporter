@@ -128,6 +128,12 @@ pub fn register_into(
                     .unwrap_or_default()
             })
             .collect();
+        debug_assert_eq!(
+            label_values.len(),
+            names.len(),
+            "label cardinality mismatch for '{}'",
+            m.name
+        );
         gv.with_label_values(&label_values).set(m.value);
     }
     for (_, gv) in vecs {

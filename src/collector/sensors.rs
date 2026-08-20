@@ -41,11 +41,16 @@ pub async fn collect_chassis_sensors<B: Bmc>(
         else {
             continue;
         };
+        let total = links.len();
+        let mut failed = 0usize;
         for link in links {
-            let sensor = link
-                .fetch()
-                .await
-                .map_err(|e| format!("sensor fetch: {e}"))?;
+            let sensor = match link.fetch().await {
+                Ok(sensor) => sensor,
+                Err(_) => {
+                    failed += 1;
+                    continue;
+                }
+            };
             let labels = collect_labels(&sensor);
             let Some(reading) = unbox_reading(sensor.reading) else {
                 continue;
@@ -97,6 +102,11 @@ pub async fn collect_chassis_sensors<B: Bmc>(
                 THRESHOLD_LOWER_CRITICAL,
                 "lower_critical",
             );
+        }
+        if failed > 0 && failed == total {
+            return Err(format!(
+                "sensor fetch: all {failed}/{total} sensor fetches failed"
+            ));
         }
     }
     Ok(out)

@@ -6,7 +6,8 @@ use std::sync::Arc;
 #[tokio::test]
 async fn snapshot_atomic_update_and_read() {
     let snap = Snapshot::new();
-    assert!(snap.registry().is_none());
+    assert!(snap.is_empty());
+    assert!(snap.registry("bmc1").is_none());
     let reg = build_registry(
         "bmc1",
         &ScrapeReport {
@@ -20,8 +21,11 @@ async fn snapshot_atomic_update_and_read() {
     )
     .await
     .unwrap();
-    snap.update(reg.clone());
-    assert!(Arc::ptr_eq(&snap.registry().unwrap(), &reg));
+    snap.update("bmc1", reg.clone());
+    assert!(!snap.is_empty());
+    assert!(Arc::ptr_eq(&snap.registry("bmc1").unwrap(), &reg));
+    assert!(snap.registry("bmc2").is_none());
+    assert_eq!(snap.registries().len(), 1);
 }
 
 #[tokio::test]
