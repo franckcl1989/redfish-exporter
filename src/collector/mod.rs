@@ -2,6 +2,7 @@ pub mod memory;
 pub mod power;
 pub mod processors;
 pub mod sensors;
+pub mod storage;
 
 use crate::metrics::{Metric, SCRAPE_DURATION, UP};
 use nv_redfish::Bmc;
@@ -37,7 +38,11 @@ pub async fn collect_all<B: Bmc>(
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    // Task 7-9 在此挂接其余 collector
+    match storage::collect_storage(Arc::clone(&bmc), &root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
+    // Task 8-9 在此挂接其余 collector
 
     let up = if failed_resources.is_empty() {
         1.0
