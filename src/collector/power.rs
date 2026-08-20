@@ -28,12 +28,14 @@ pub async fn collect_power_metrics<B: Bmc>(
     bmc_name: &str,
 ) -> Result<Vec<Metric>, String> {
     let mut out = Vec::new();
-    let Some(chassis_collection) = root.chassis().await.ok().flatten() else {
+    let Some(chassis_collection) = root.chassis().await.map_err(|e| format!("chassis: {e}"))?
+    else {
         return Ok(out);
     };
-    let Ok(chassis_members) = chassis_collection.members().await else {
-        return Ok(out);
-    };
+    let chassis_members = chassis_collection
+        .members()
+        .await
+        .map_err(|e| format!("chassis members: {e}"))?;
     for chassis in chassis_members {
         let chassis_id = chassis.id().to_string();
         collect_legacy_thermal(bmc.as_ref(), bmc_name, &chassis_id, &chassis, &mut out).await?;

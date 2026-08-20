@@ -131,6 +131,24 @@ async fn collect_all_reports_up_duration_and_sensor_metrics() {
     expect_service_root(&bmc);
     expect_chassis_collection(&bmc);
     expect_sensor_payloads(&bmc);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis",
+            "@odata.type": "#ChassisCollection.ChassisCollection",
+            "Name": "Chassis Collection",
+            "Members": [{ "@odata.id": "/redfish/v1/Chassis/1" }],
+            "Members@odata.count": 1,
+        }),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/1",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis/1",
+            "Id": "1", "Name": "Chassis 1", "ChassisType": "RackMount",
+            "Sensors": { "@odata.id": "/redfish/v1/Chassis/1/Sensors" },
+        }),
+    ));
 
     let report = collect_all(bmc, "bmc1").await.unwrap();
     assert!(report.failed_resources.is_empty());
