@@ -1,3 +1,4 @@
+pub mod power;
 pub mod sensors;
 
 use crate::metrics::{Metric, SCRAPE_DURATION, UP};
@@ -19,6 +20,10 @@ pub async fn collect_all<B: Bmc>(
     let mut failed_resources = Vec::new();
 
     match sensors::collect_chassis_sensors(Arc::clone(&bmc), &root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
+    match power::collect_power_metrics(Arc::clone(&bmc), &root, bmc_name).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
