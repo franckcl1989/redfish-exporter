@@ -1,0 +1,32 @@
+[package]
+name = "redfish-exporter"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "Apache-2.0"
+description = "Prometheus exporter for Redfish BMCs, built on nv-redfish"
+
+[dependencies]
+nv-redfish = { version = "0.15", default-features = false, features = [
+    "bmc-http", "chassis", "computer-systems", "managers", "assembly",
+    "sensors", "thermal", "power", "power-supplies", "controls", "environment-metrics",
+    "processors", "memory", "storages", "ethernet-interfaces",
+    "network-adapters", "ports", "pcie-devices", "update-service", "session-service",
+] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+prometheus = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+humantime = "2"
+url = "2"
+
+[dev-dependencies]
+nv-redfish-bmc-mock = "0.15"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
