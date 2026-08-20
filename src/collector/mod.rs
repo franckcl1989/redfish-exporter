@@ -1,4 +1,6 @@
+pub mod memory;
 pub mod power;
+pub mod processors;
 pub mod sensors;
 
 use crate::metrics::{Metric, SCRAPE_DURATION, UP};
@@ -27,7 +29,15 @@ pub async fn collect_all<B: Bmc>(
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    // Task 5-9 在此挂接其余 collector
+    match processors::collect_processors(Arc::clone(&bmc), &root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
+    match memory::collect_memory(Arc::clone(&bmc), &root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
+    // Task 7-9 在此挂接其余 collector
 
     let up = if failed_resources.is_empty() {
         1.0

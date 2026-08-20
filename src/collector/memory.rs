@@ -1,0 +1,154 @@
+use crate::metrics::{
+    HEALTH_STATUS, INFO, MEMORY_BANDWIDTH, MEMORY_CAPACITY, Metric, health_state_labels,
+    unbox_reading,
+};
+use nv_redfish::Bmc;
+use nv_redfish::Resource as _;
+use nv_redfish::schema::resource::{Health, Status};
+use std::sync::Arc;
+
+pub async fn collect_memory<B: Bmc>(
+    _bmc: Arc<B>,
+    root: &nv_redfish::ServiceRoot<B>,
+    bmc_name: &str,
+) -> Result<Vec<Metric>, String> {
+    let mut out = Vec::new();
+    let Some(systems) = root.systems().await.map_err(|e| format!("systems: {e}"))? else {
+        return Ok(out);
+    };
+    let systems = systems
+        .members()
+        .await
+        .map_err(|e| format!("systems members: {e}"))?;
+    for system in systems {
+        let system_id = system.id().to_string();
+        let Ok(Some(modules)) = system.memory_modules().await else {
+            continue;
+        };
+        for module in modules {
+            collect_module(bmc_name, &system_id, &module, &mut out).await;
+        }
+    }
+    Ok(out)
+}
+
+async fn collect_module<B: Bmc>(
+    bmc_name: &str,
+    system_id: &str,
+    module: &nv_redfish::computer_system::Memory<B>,
+    out: &mut Vec<Metric>,
+) {
+    let raw = module.raw();
+    let id = module.id().to_string();
+    push_health(out, bmc_name, "memory", &id, raw.status.as_ref());
+    if let Some(value) = raw.manufacturer.clone().flatten() {
+        push_info(out, bmc_name, "manufacturer", &value);
+    }
+    if let Some(value) = raw.part_number.clone().flatten() {
+        push_info(out, bmc_name, "part_number", &value);
+    }
+    if let Some(value) = raw.memory_type.flatten() {
+        push_info(out, bmc_name, "memory_type", &format!("{value:?}"));
+    }
+    push_capacity(out, bmc_name, system_id, &id, raw.capacity_mi_b.flatten());
+    let Ok(Some(metrics)) = module.metrics().await else {
+        return;
+    };
+    push_value(
+        out,
+        bmc_name,
+        system_id,
+        &id,
+        MEMORY_BANDWIDTH,
+        unbox_reading(metrics.raw().bandwidth_percent),
+    );
+}
+
+fn push_value(
+    out: &mut Vec<Metric>,
+    bmc_name: &str,
+    system_id: &str,
+    id: &str,
+    name_help: (&'static str, &'static str),
+    value: Option<f64>,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    out.push(
+        Metric::gauge(name_help.0, name_help.1)
+            .label("bmc", bmc_name.to_string())
+            .label("system", system_id.to_string())
+            .label("id", id.to_string())
+            .build(value),
+    );
+}
+
+fn push_capacity(
+    out: &mut Vec<Metric>,
+    bmc_name: &str,
+    system_id: &str,
+    id: &str,
+    capacity_mib: Option<i64>,
+) {
+    let Some(capacity_mib) = capacity_mib else {
+        return;
+    };
+    out.push(
+        Metric::gauge(MEMORY_CAPACITY.0, MEMORY_CAPACITY.1)
+            .label("bmc", bmc_name.to_string())
+            .label("system", system_id.to_string())
+            .label("id", id.to_string())
+            .build(capacity_mib as f64 * 1048576.0),
+    );
+}
+
+fn push_health(
+    out: &mut Vec<Metric>,
+    bmc_name: &str,
+    resource_type: &str,
+    id: &str,
+    status: Option<&Status>,
+) {
+    let (health, state) = status_labels(status);
+    out.push(
+        Metric::gauge(HEALTH_STATUS.0, HEALTH_STATUS.1)
+            .label("bmc", bmc_name.to_string())
+            .label("resource_type", resource_type.to_string())
+            .label("id", id.to_string())
+            .label("health", health)
+            .label("state", state)
+            .build(1.0),
+    );
+}
+
+fn push_info(out: &mut Vec<Metric>, bmc_name: &str, key: &str, value: &str) {
+    out.push(
+        Metric::gauge(INFO.0, INFO.1)
+            .label("bmc", bmc_name.to_string())
+            .label("key", key.to_string())
+            .label("value", value.to_string())
+            .build(1.0),
+    );
+}
+
+fn status_labels(status: Option<&Status>) -> (String, String) {
+    let health = status
+        .and_then(|s| s.health.as_ref())
+        .and_then(|h| h.as_ref())
+        .map(health_str);
+    let state = status
+        .and_then(|s| s.state.as_ref())
+        .and_then(|h| h.as_ref())
+        .map(|s| format!("{s:?}"));
+    health_state_labels(health, state.as_deref())
+}
+
+fn health_str(health: &Health) -> &'static str {
+    match health {
+        Health::Ok => "OK",
+        Health::Warning => "Warning",
+        Health::Critical => "Critical",
+        Health::UnsupportedValue => "UnsupportedValue",
+    }
+}
