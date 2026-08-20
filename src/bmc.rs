@@ -21,8 +21,13 @@ pub struct BmcHandle {
 }
 
 pub fn build_http_client(cfg: &BmcConfig) -> Result<ReqwestClient, BmcError> {
-    let mut builder =
-        reqwest::Client::builder().danger_accept_invalid_certs(cfg.insecure_skip_verify);
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .user_agent("nv-redfish/v1");
+    if cfg.insecure_skip_verify {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
     if let Some(ca) = &cfg.ca_cert_file {
         let pem =
             std::fs::read(ca).with_context(|| format!("read ca_cert_file '{}'", ca.display()))?;
