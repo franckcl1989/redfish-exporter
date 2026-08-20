@@ -1,5 +1,6 @@
 use anyhow::Context;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 use crate::config::BmcConfig;
@@ -20,9 +21,12 @@ pub struct BmcHandle {
     pub bmc: Arc<HttpBmc<ReqwestClient>>,
 }
 
-pub fn build_http_client(cfg: &BmcConfig) -> Result<ReqwestClient, BmcError> {
+pub fn build_http_client(
+    cfg: &BmcConfig,
+    request_timeout: Duration,
+) -> Result<ReqwestClient, BmcError> {
     let mut builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(request_timeout)
         .connect_timeout(std::time::Duration::from_secs(5))
         .user_agent("nv-redfish/v1");
     if cfg.insecure_skip_verify {

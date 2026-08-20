@@ -53,7 +53,7 @@ Values are pushed on every scrape; labels whose source field is absent on the BM
 
 | Metric                                | Labels                | Help text from code                              | Source |
 |---------------------------------------|-----------------------|--------------------------------------------------|--------|
-| `redfish_processor_temperature_celsius| `bmc`, `system`, `id` | Processor temperature in Celsius                  | `ProcessorMetrics.temperature_celsius` |
+| `redfish_processor_temperature_celsius` | `bmc`, `system`, `id` | Processor temperature in Celsius                  | `ProcessorMetrics.temperature_celsius` |
 | `redfish_processor_power_watts`       | `bmc`, `system`, `id` | Processor power in watts                          | `ProcessorMetrics.consumed_power_watt` |
 | `redfish_processor_bandwidth_percent` | `bmc`, `system`, `id` | Processor bandwidth utilization percentage        | `ProcessorMetrics.bandwidth_percent` |
 

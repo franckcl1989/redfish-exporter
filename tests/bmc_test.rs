@@ -16,14 +16,14 @@ fn cfg() -> BmcConfig {
 
 #[test]
 fn builds_reqwest_client_with_tls_options() {
-    let c = build_http_client(&cfg()).unwrap();
+    let c = build_http_client(&cfg(), std::time::Duration::from_secs(10)).unwrap();
     // 无法直接断言 reqwest 内部状态；此测试主要验证类型与构造路径可运行。
     let _ = c;
 }
 
 #[test]
 fn make_bmc_wraps_name() {
-    let client = build_http_client(&cfg()).unwrap();
+    let client = build_http_client(&cfg(), std::time::Duration::from_secs(10)).unwrap();
     let handle = make_bmc(&cfg(), client);
     assert_eq!(handle.name, "bmc1");
 }
@@ -32,5 +32,5 @@ fn make_bmc_wraps_name() {
 fn rejects_missing_ca_file() {
     let mut c = cfg();
     c.ca_cert_file = Some("C:\\nonexistent\\ca.pem".into());
-    assert!(build_http_client(&c).is_err());
+    assert!(build_http_client(&c, std::time::Duration::from_secs(10)).is_err());
 }

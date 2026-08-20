@@ -22,7 +22,7 @@ impl Scraper {
     pub async fn new(cfg: &Config, snapshot: Arc<Snapshot>) -> Result<Self, anyhow::Error> {
         let mut bmcs = Vec::with_capacity(cfg.bmcs.len());
         for bmc_cfg in &cfg.bmcs {
-            let client = build_http_client(bmc_cfg)?;
+            let client = build_http_client(bmc_cfg, cfg.request_timeout)?;
             let handle = make_bmc(bmc_cfg, client);
             if bmc_cfg.auth == AuthMethod::Session {
                 let token =

@@ -100,7 +100,7 @@ From `config.rs` (`load_config`), applied in order:
 6. `scrape_interval`, `scrape_timeout`, `request_timeout` must be non-zero (durations via `humantime`, e.g. `30s`).
 7. Defaults: `listen_addr=0.0.0.0:9417`, `scrape_interval=30s`, `scrape_timeout=15s`, `request_timeout=10s`, `auth=basic`, `insecure_skip_verify=false`, `ca_cert_file=null`.
 
-Client-level HTTP: 120 s request timeout, 5 s connect timeout, user agent `nv-redfish/v1`; `ca_cert_file` adds a root certificate, `insecure_skip_verify` disables certificate verification entirely.
+Client-level HTTP: request timeout from `request_timeout` config (default 10 s), 5 s connect timeout, user agent `nv-redfish/v1`; `ca_cert_file` adds a root certificate, `insecure_skip_verify` disables certificate verification entirely.
 
 ## Metric naming conventions
 

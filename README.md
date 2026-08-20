@@ -32,7 +32,7 @@ See [`config.example.yaml`](config.example.yaml). All durations use `humantime` 
 | `listen_addr`            | `0.0.0.0:9417`| HTTP listen address for `/metrics` and `/healthz`               |
 | `scrape_interval`        | `30s`         | Interval between scrape rounds                                   |
 | `scrape_timeout`         | `15s`         | Deadline for one scrape round; tasks are aborted when exceeded   |
-| `request_timeout`        | `10s`         | Per-HTTP-request timeout against the BMC (overridden by the client-level timeout) |
+| `request_timeout`        | `10s`         | Per-request HTTP timeout, applied to every BMC request       |
 | `bmcs`                   | required      | Non-empty list of BMC entries                                    |
 | `bmcs[].name`            | required      | Unique name, used as the `bmc` metric label                      |
 | `bmcs[].host`            | required      | BMC base URL, scheme `http` or `https`                           |
