@@ -1,9 +1,29 @@
 name: CI
-
-on: [push]
+on:
+  push:
+    branches: [master]
+  pull_request:
 
 jobs:
-  build:
+  lint-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-targets
+      - run: cargo doc --no-deps
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit dependencies
+        run: cargo audit
+      - name: Deny policy checks
+        uses: EmbarkStudios/cargo-deny-action@v2
