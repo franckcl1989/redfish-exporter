@@ -223,3 +223,50 @@ bmcs:
         Err(ConfigError::Invalid(_))
     ));
 }
+
+#[test]
+fn web_token_too_short_is_rejected() {
+    let p = write_tmp(
+        "web_token_short",
+        "web:\n  auth_token: short\nbmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
+    );
+    assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
+}
+
+#[test]
+fn web_token_and_file_are_mutually_exclusive() {
+    let p = write_tmp(
+        "web_token_both",
+        "web:\n  auth_token: 0123456789abcdef\n  auth_token_file: /tmp/tok\nbmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
+    );
+    assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
+}
+
+#[test]
+fn web_tls_cert_requires_key() {
+    let p = write_tmp(
+        "web_tls_half",
+        "web:\n  tls_cert_file: /tmp/cert.pem\nbmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
+    );
+    assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
+}
+
+#[test]
+fn web_token_file_content_is_loaded() {
+    let dir = std::env::temp_dir().join(format!("redfish-exporter-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tok_path = dir.join("webtoken");
+    std::fs::write(&tok_path, "0123456789abcdef\n").unwrap();
+    let p = write_tmp(
+        "web_token_file",
+        &format!(
+            "web:\n  auth_token_file: {}\nbmcs:\n  - {{ name: a, host: https://h1, username: u, password: \"p\" }}\n",
+            tok_path.display()
+        ),
+    );
+    let cfg = load_config(&p).unwrap();
+    assert_eq!(
+        cfg.web.auth_token.as_ref().unwrap().expose(),
+        "0123456789abcdef"
+    );
+}

@@ -12,18 +12,20 @@ use axum::routing::{get, post};
 use tokio::sync::{RwLock, watch};
 use tracing::info;
 
-use crate::config::{Config, load_config};
+use crate::auth::bearer_authorized;
+use crate::config::{Config, SecretString, load_config};
 use crate::metrics::encode;
 use crate::registry::Snapshot;
 
 const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
-/// HTTP 路由共享状态：指标快照 + 运行时配置（/reload 热替换）+ 配置文件路径。
+/// HTTP 路由共享状态：指标快照 + 运行时配置（/reload 热替换）+ 配置文件路径 + 启动时 token。
 #[derive(Clone)]
 struct AppState {
     snapshot: Arc<Snapshot>,
     config: Arc<RwLock<Config>>,
     config_path: PathBuf,
+    auth_token: Option<SecretString>,
 }
 
 /// 构造 HTTP 路由：`/metrics`、`/healthz`、`/info`、`/discover`、`/reload`。
@@ -31,18 +33,45 @@ pub fn router(
     snapshot: Arc<Snapshot>,
     config: Arc<RwLock<Config>>,
     config_path: PathBuf,
+    auth_token: Option<SecretString>,
 ) -> Router {
+    let state = AppState {
+        snapshot,
+        config,
+        config_path,
+        auth_token,
+    };
     Router::new()
         .route("/metrics", get(metrics_handler))
         .route("/healthz", get(healthz_handler))
         .route("/info", get(info_handler))
         .route("/discover", get(discover_handler))
         .route("/reload", post(reload_handler))
-        .with_state(AppState {
-            snapshot,
-            config,
-            config_path,
-        })
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
+        .with_state(state)
+}
+
+/// Bearer 认证中间件：配置了 token 时全部端点（含 /healthz、/reload）统一要求认证。
+/// 401 + `WWW-Authenticate: Bearer`；未配置 token 时直通（默认安全基线外的显式选择）。
+async fn auth_middleware(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if let Some(token) = &state.auth_token
+        && !bearer_authorized(req.headers(), token.expose())
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+            "unauthorized",
+        )
+            .into_response();
+    }
+    next.run(req).await
 }
 
 async fn metrics_handler(State(state): State<AppState>) -> Response {
@@ -114,12 +143,15 @@ pub async fn serve(
     config_path: PathBuf,
     mut stop: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let listen_addr = config.read().await.listen_addr;
+    let (listen_addr, auth_token) = {
+        let cfg = config.read().await;
+        (cfg.listen_addr, cfg.web.auth_token.clone())
+    };
     let listener = tokio::net::TcpListener::bind(listen_addr)
         .await
         .with_context(|| format!("failed to bind listen address {listen_addr}"))?;
     info!(addr = %listen_addr, "http server listening");
-    axum::serve(listener, router(snapshot, config, config_path))
+    axum::serve(listener, router(snapshot, config, config_path, auth_token))
         .with_graceful_shutdown(async move {
             let _ = stop.changed().await;
         })

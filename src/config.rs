@@ -49,6 +49,13 @@ pub struct BmcConfig {
     pub ca_cert_file: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct WebConfig {
+    pub auth_token: Option<SecretString>,
+    pub tls_cert_file: Option<PathBuf>,
+    pub tls_key_file: Option<PathBuf>,
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub listen_addr: SocketAddr,
@@ -57,6 +64,7 @@ pub struct Config {
     pub scrape_timeout: Duration,
     pub request_timeout: Duration,
     pub bmcs: Vec<BmcConfig>,
+    pub web: WebConfig,
 }
 
 #[derive(Debug, Error)]
@@ -81,6 +89,14 @@ struct RawBmcConfig {
     insecure_skip_verify: bool,
     #[serde(default)]
     ca_cert_file: Option<PathBuf>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawWebConfig {
+    auth_token: Option<String>,
+    auth_token_file: Option<PathBuf>,
+    tls_cert_file: Option<PathBuf>,
+    tls_key_file: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -109,6 +125,8 @@ struct RawConfig {
     request_timeout: Duration,
     #[serde(default)]
     bmcs: Vec<RawBmcConfig>,
+    #[serde(default)]
+    web: RawWebConfig,
 }
 
 fn default_listen_addr() -> String {
@@ -259,6 +277,7 @@ pub fn load_config_with_env(
     if raw.request_timeout.is_zero() {
         return Err(ConfigError::Invalid("request_timeout must be > 0".into()));
     }
+    let web = build_web_config(&raw.web)?;
     Ok(Config {
         listen_addr,
         scrape_interval: raw.scrape_interval,
@@ -266,5 +285,51 @@ pub fn load_config_with_env(
         scrape_timeout: raw.scrape_timeout,
         request_timeout: raw.request_timeout,
         bmcs,
+        web,
+    })
+}
+
+/// 校验并构建 web 配置节：token 长度下限、token 与 token_file 互斥、TLS 证书与密钥成对。
+fn build_web_config(raw: &RawWebConfig) -> Result<WebConfig, ConfigError> {
+    let auth_token = match (&raw.auth_token, &raw.auth_token_file) {
+        (Some(_), Some(_)) => {
+            return Err(ConfigError::Invalid(
+                "web: auth_token and auth_token_file are mutually exclusive".into(),
+            ));
+        }
+        (Some(t), None) => {
+            if t.len() < 16 {
+                return Err(ConfigError::Invalid(
+                    "web.auth_token must be at least 16 characters".into(),
+                ));
+            }
+            Some(SecretString::new(t.clone()))
+        }
+        (None, Some(path)) => {
+            let content = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
+            let token = content.trim().to_string();
+            if token.len() < 16 {
+                return Err(ConfigError::Invalid(format!(
+                    "web.auth_token_file '{}': token must be at least 16 characters",
+                    path.display()
+                )));
+            }
+            Some(SecretString::new(token))
+        }
+        (None, None) => None,
+    };
+    let tls = match (&raw.tls_cert_file, &raw.tls_key_file) {
+        (None, None) => (None, None),
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(ConfigError::Invalid(
+                "web: tls_cert_file and tls_key_file must be set together".into(),
+            ));
+        }
+        (Some(c), Some(k)) => (Some(c.clone()), Some(k.clone())),
+    };
+    Ok(WebConfig {
+        auth_token,
+        tls_cert_file: tls.0,
+        tls_key_file: tls.1,
     })
 }

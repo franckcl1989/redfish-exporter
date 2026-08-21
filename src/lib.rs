@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod bmc;
 pub mod collector;
 pub mod config;
