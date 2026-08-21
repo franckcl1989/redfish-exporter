@@ -353,7 +353,8 @@ async fn collect_round(
     let mut slow_report = cache.as_ref().and_then(|(_, r)| r.clone());
     let mut slow_failed = Vec::new();
     if slow_due(cache.as_ref().map(|(t, _)| *t), slow_interval) {
-        let result = match with_deadline(timeout, collect_slow(Arc::clone(&bmc), &root, name)).await {
+        let result = match with_deadline(timeout, collect_slow(Arc::clone(&bmc), &root, name)).await
+        {
             Some(r) => r,
             None => {
                 warn!(bmc = %name, "slow group timed out after {:?}", timeout);
