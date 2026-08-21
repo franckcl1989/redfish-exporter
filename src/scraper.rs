@@ -223,6 +223,43 @@ impl Scraper {
     }
 }
 
+/// 慢组是否到点：无 slow_interval → 从不；无上次时间（首轮）→ 到点即采；
+/// 否则距上次采集已满 interval 才到点。
+pub fn slow_due(last: Option<Instant>, interval: Option<Duration>) -> bool {
+    match interval {
+        None => false,
+        Some(interval) => last.map(|t| t.elapsed() >= interval).unwrap_or(true),
+    }
+}
+
+/// 应用一轮慢采结果：成功 → 返回带新时间戳的缓存项；失败 → 保留原缓存
+/// （last-good 不清空），失败资源由调用方并入本轮 failed_resources。
+pub fn apply_slow_result(
+    cache: Option<(Instant, Option<ScrapeReport>)>,
+    slow_result: Result<ScrapeReport, String>,
+    now: Instant,
+) -> (Option<(Instant, Option<ScrapeReport>)>, Vec<String>) {
+    match slow_result {
+        Ok(report) => (Some((now, Some(report))), Vec::new()),
+        Err(resource) => (cache, vec![resource]),
+    }
+}
+
+/// 合并快/慢组结果，并把慢组失败资源并入 failed_resources（去重）。
+pub fn merge_round(
+    fast: ScrapeReport,
+    slow: Option<&ScrapeReport>,
+    slow_failed: Vec<String>,
+) -> ScrapeReport {
+    let mut merged = merge_reports(fast, slow);
+    for r in slow_failed {
+        if !merged.failed_resources.contains(&r) {
+            merged.failed_resources.push(r);
+        }
+    }
+    merged
+}
+
 /// 单 BMC 单轮：快组必采，慢组按 slow_interval 到期才采（结果缓存跨轮复用）。
 /// 返回 nv_redfish::Error 而非 String，供 401 重登/404 判定直接匹配状态码。
 async fn collect_round(
@@ -240,38 +277,27 @@ async fn collect_round(
             failed_resources: vec![resource],
         },
     };
-    let mut slow_report = slow_state
-        .lock()
-        .unwrap()
-        .get(name)
-        .and_then(|(_, r)| r.clone());
-    let slow_due = match slow_interval {
-        Some(interval) => {
-            let last = slow_state
-                .lock()
-                .unwrap()
-                .get(name)
-                .map(|(t, _)| *t)
-                .unwrap_or(Instant::now() - interval);
-            last.elapsed() >= interval
+    let cache = slow_state.lock().unwrap().get(name).cloned();
+    let mut slow_report = cache.as_ref().and_then(|(_, r)| r.clone());
+    let mut slow_failed = Vec::new();
+    if slow_due(cache.as_ref().map(|(t, _)| *t), slow_interval) {
+        let result = collect_slow(Arc::clone(&bmc), &root, name).await;
+        let (new_cache, failed) = apply_slow_result(cache, result, Instant::now());
+        if failed.is_empty() {
+            slow_report = new_cache.as_ref().and_then(|(_, r)| r.clone());
+            if let Some(entry) = new_cache {
+                slow_state.lock().unwrap().insert(name.to_string(), entry);
+            }
+        } else {
+            slow_failed = failed;
+            warn!(
+                bmc = %name,
+                resource = %slow_failed.join(","),
+                "slow group failed; keeping last-good slow metrics"
+            );
         }
-        None => false,
-    };
-    if slow_due {
-        let new_slow = match collect_slow(Arc::clone(&bmc), &root, name).await {
-            Ok(r) => r,
-            Err(resource) => ScrapeReport {
-                metrics: vec![],
-                failed_resources: vec![resource],
-            },
-        };
-        slow_report = Some(new_slow.clone());
-        slow_state
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), (Instant::now(), Some(new_slow)));
     }
-    let merged = merge_reports(fast, slow_report.as_ref());
+    let merged = merge_round(fast, slow_report.as_ref(), slow_failed);
     Ok(finalize_report(
         name,
         merged.metrics,

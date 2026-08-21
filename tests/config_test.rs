@@ -105,3 +105,17 @@ bmcs:
     let cfg = load_config(&p).unwrap();
     assert_eq!(cfg.slow_interval, None);
 }
+
+#[test]
+fn rejects_zero_slow_interval() {
+    let p = write_tmp(
+        "slow_zero",
+        r#"
+scrape_interval: "30s"
+slow_interval: "0s"
+bmcs:
+  - { name: a, host: https://h1, username: u, password: "p" }
+"#,
+    );
+    assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
+}

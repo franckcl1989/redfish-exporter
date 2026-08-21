@@ -2,7 +2,9 @@ use redfish_exporter::collector::ScrapeReport;
 use redfish_exporter::collector::merge_reports;
 use redfish_exporter::metrics::{Metric, encode};
 use redfish_exporter::registry::{Snapshot, build_registry};
+use redfish_exporter::scraper::{apply_slow_result, merge_round, slow_due};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[tokio::test]
 async fn snapshot_atomic_update_and_read() {
@@ -84,4 +86,88 @@ async fn merge_reports_combines_metrics_and_failed() {
     let merged = merge_reports(fast, Some(&slow));
     assert_eq!(merged.metrics.len(), 2);
     assert_eq!(merged.failed_resources, vec!["sensors", "storage"]);
+}
+
+fn slow_report(value: f64) -> ScrapeReport {
+    ScrapeReport {
+        metrics: vec![Metric::gauge("slow_metric", "s").build(value)],
+        failed_resources: vec![],
+    }
+}
+
+#[test]
+fn slow_due_never_without_interval() {
+    assert!(!slow_due(None, None));
+    assert!(!slow_due(Some(Instant::now()), None));
+}
+
+#[test]
+fn slow_due_true_on_first_round_without_subtraction() {
+    assert!(slow_due(None, Some(Duration::from_secs(48 * 3600))));
+}
+
+#[test]
+fn slow_due_true_after_interval_elapsed() {
+    let last = Instant::now() - Duration::from_millis(50);
+    assert!(slow_due(Some(last), Some(Duration::from_millis(10))));
+}
+
+#[test]
+fn slow_due_false_before_interval_elapsed() {
+    assert!(!slow_due(
+        Some(Instant::now()),
+        Some(Duration::from_millis(10))
+    ));
+}
+
+#[test]
+fn apply_slow_result_success_caches_report() {
+    let (cache, failed) = apply_slow_result(None, Ok(slow_report(1.0)), Instant::now());
+    assert!(failed.is_empty());
+    let (_, report) = cache.expect("cached");
+    assert_eq!(report.expect("report").metrics[0].value, 1.0);
+}
+
+#[test]
+fn apply_slow_result_failure_keeps_last_good_cache() {
+    let cache = Some((Instant::now(), Some(slow_report(1.0))));
+    let (new_cache, failed) = apply_slow_result(cache, Err("storage".into()), Instant::now());
+    assert_eq!(failed, vec!["storage"]);
+    let (_, report) = new_cache.expect("last good kept");
+    assert_eq!(report.expect("report").metrics[0].value, 1.0);
+}
+
+#[test]
+fn apply_slow_result_first_round_failure_caches_nothing() {
+    let (new_cache, failed) = apply_slow_result(None, Err("storage".into()), Instant::now());
+    assert_eq!(failed, vec!["storage"]);
+    assert!(new_cache.is_none());
+}
+
+#[test]
+fn slow_failure_keeps_last_good_metrics_in_merged_output() {
+    let fast = ScrapeReport {
+        metrics: vec![Metric::gauge("fast_metric", "f").build(3.0)],
+        failed_resources: vec![],
+    };
+    let cache = Some((Instant::now(), Some(slow_report(1.0))));
+    let (new_cache, failed) = apply_slow_result(cache, Err("storage".into()), Instant::now());
+    let merged = merge_round(
+        fast,
+        new_cache.as_ref().and_then(|(_, r)| r.as_ref()),
+        failed,
+    );
+    assert!(merged.metrics.iter().any(|m| m.name == "fast_metric"));
+    assert!(merged.metrics.iter().any(|m| m.name == "slow_metric"));
+    assert_eq!(merged.failed_resources, vec!["storage"]);
+}
+
+#[test]
+fn merge_round_dedupes_slow_failure_against_merged_failures() {
+    let fast = ScrapeReport {
+        metrics: vec![],
+        failed_resources: vec!["storage".into()],
+    };
+    let merged = merge_round(fast, None, vec!["storage".into()]);
+    assert_eq!(merged.failed_resources, vec!["storage"]);
 }
