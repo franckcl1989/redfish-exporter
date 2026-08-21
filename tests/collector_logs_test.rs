@@ -6,9 +6,19 @@ use std::sync::Arc;
 
 type Mock = MockBmc<serde_json::Error>;
 
-#[tokio::test]
-async fn collects_event_log_entries() {
-    let bmc = Arc::new(Mock::default());
+const ENTRIES: &str = "/redfish/v1/Managers/BMC/LogServices/Sel/Entries";
+
+fn entry_json(id: &str, created: &str, message: &str, severity: &str) -> serde_json::Value {
+    json!({
+        "@odata.id": format!("{ENTRIES}/{id}"),
+        "Id": id, "Name": format!("Entry {id}"), "EntryType": "Event",
+        "Created": created,
+        "Message": message,
+        "Severity": severity,
+    })
+}
+
+fn common_expects(bmc: &Mock) {
     bmc.expect(Expect::get(
         "/redfish/v1",
         json!({
@@ -45,41 +55,66 @@ async fn collects_event_log_entries() {
         json!({
             "@odata.id": "/redfish/v1/Managers/BMC/LogServices/Sel",
             "Id": "Sel", "Name": "SEL", "LogEntryType": "SEL",
-            "Entries": { "@odata.id": "/redfish/v1/Managers/BMC/LogServices/Sel/Entries" },
+            "Entries": { "@odata.id": ENTRIES },
         }),
     ));
+}
+
+#[tokio::test]
+async fn collects_event_log_entries() {
+    let bmc = Arc::new(Mock::default());
+    common_expects(&bmc);
     bmc.expect(Expect::get(
-        "/redfish/v1/Managers/BMC/LogServices/Sel/Entries",
+        ENTRIES,
         json!({
-            "@odata.id": "/redfish/v1/Managers/BMC/LogServices/Sel/Entries",
+            "@odata.id": ENTRIES,
             "@odata.type": "#LogEntryCollection.LogEntryCollection",
             "Name": "Entries",
-            "Members": [{
-                "@odata.id": "/redfish/v1/Managers/BMC/LogServices/Sel/Entries/1",
-                "Id": "1", "Name": "Entry 1", "EntryType": "Event",
-                "Created": "2026-08-01T12:00:00Z",
-                "Message": "Fan redundancy lost",
-                "Severity": "Critical",
-            }],
-        }),
-    ));
-    bmc.expect(Expect::get(
-        "/redfish/v1/Managers/BMC/LogServices/Sel/Entries/1",
-        json!({
-            "@odata.id": "/redfish/v1/Managers/BMC/LogServices/Sel/Entries/1",
-            "Id": "1", "Name": "Entry 1", "EntryType": "Event",
-            "Created": "2026-08-01T12:00:00Z",
-            "Message": "Fan redundancy lost",
-            "Severity": "Critical",
+            "Members": [entry_json("1", "2026-08-01T12:00:00Z", "Fan redundancy lost", "Critical")],
         }),
     ));
 
     let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
     let metrics = collect_event_logs(bmc, &root, "bmc1").await.unwrap();
-    let entry: Vec<_> = metrics
+    let entries: Vec<_> = metrics
         .iter()
         .filter(|m| m.name == "redfish_event_log_entry")
         .collect();
-    assert_eq!(entry.len(), 1);
-    assert_eq!(entry[0].value, 1785585600.0); // 2026-08-01T12:00:00Z
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].value, 1785585600.0); // 2026-08-01T12:00:00Z
+}
+
+#[tokio::test]
+async fn collects_event_log_entries_across_pages() {
+    let bmc = Arc::new(Mock::default());
+    common_expects(&bmc);
+    bmc.expect(Expect::get(
+        ENTRIES,
+        json!({
+            "@odata.id": ENTRIES,
+            "@odata.type": "#LogEntryCollection.LogEntryCollection",
+            "Name": "Entries",
+            "Members": [entry_json("2", "2026-08-01T12:00:00Z", "Fan redundancy lost", "Critical")],
+            "Members@odata.nextLink": format!("{ENTRIES}?$skip=1"),
+        }),
+    ));
+    bmc.expect(Expect::get(
+        format!("{ENTRIES}?$skip=1"),
+        json!({
+            "@odata.id": format!("{ENTRIES}?$skip=1"),
+            "@odata.type": "#LogEntryCollection.LogEntryCollection",
+            "Name": "Entries",
+            "Members": [entry_json("1", "2026-08-01T13:00:00Z", "Power supply restored", "OK")],
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_event_logs(bmc, &root, "bmc1").await.unwrap();
+    let entries: Vec<_> = metrics
+        .iter()
+        .filter(|m| m.name == "redfish_event_log_entry")
+        .collect();
+    assert_eq!(entries.len(), 2);
+    let ts: Vec<_> = entries.iter().map(|m| m.value).collect();
+    assert_eq!(ts, vec![1785585600.0, 1785589200.0]); // 12:00Z, 13:00Z
 }

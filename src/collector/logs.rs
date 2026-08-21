@@ -1,4 +1,5 @@
 use crate::metrics::Metric;
+use crate::pagination::fetch_all_pages;
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
 use std::sync::Arc;
@@ -10,7 +11,7 @@ pub const EVENT_LOG_ENTRY: (&str, &str) = (
 );
 
 pub async fn collect_event_logs<B: Bmc>(
-    _bmc: Arc<B>,
+    bmc: Arc<B>,
     root: &nv_redfish::ServiceRoot<B>,
     bmc_name: &str,
 ) -> Result<Vec<Metric>, String> {
@@ -33,10 +34,19 @@ pub async fn collect_event_logs<B: Bmc>(
         };
         for service in services {
             let service_id = service.id().to_string();
-            let Ok(Some(entries)) = service.entries().await else {
+            let raw = service.raw();
+            let Some(entries_ref) = &raw.entries else {
                 continue;
             };
-            for entry in entries {
+            let Ok(entries) = fetch_all_pages(&bmc, entries_ref.id()).await else {
+                continue;
+            };
+            for value in entries {
+                let Ok(entry) =
+                    serde_json::from_value::<nv_redfish::schema::log_entry::LogEntry>(value)
+                else {
+                    continue;
+                };
                 push_entry(&mut out, bmc_name, &manager_id, &service_id, &entry);
             }
         }
