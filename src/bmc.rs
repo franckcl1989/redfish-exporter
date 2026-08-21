@@ -1,5 +1,6 @@
 use anyhow::Context;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -22,6 +23,9 @@ pub struct BmcHandle {
     pub username: String,
     pub password: SecretString,
     pub auth: AuthMethod,
+    /// Session 认证是否已成功建立（仅对 Session auth 有意义）。
+    /// Arc<AtomicBool>：跨轮共享，scraper 各轮任务都可读取/置位。
+    pub session_established: Arc<AtomicBool>,
 }
 
 /// 判断采集错误是否由 401 未授权引起（session token 过期等场景）。
@@ -78,6 +82,7 @@ pub fn make_bmc(cfg: &BmcConfig, client: ReqwestClient) -> BmcHandle {
         username: cfg.username.clone(),
         password: cfg.password.clone(),
         auth: cfg.auth,
+        session_established: Arc::new(AtomicBool::new(false)),
     }
 }
 

@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use tokio::task::JoinHandle;
@@ -31,18 +32,23 @@ impl Scraper {
             let client = build_http_client(bmc_cfg, cfg.request_timeout)?;
             let handle = make_bmc(bmc_cfg, client);
             if bmc_cfg.auth == AuthMethod::Session {
-                let token =
-                    establish_session(&handle.bmc, &bmc_cfg.username, bmc_cfg.password.expose())
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "bmc '{}': session establishment failed: {e}",
-                                bmc_cfg.name
-                            )
-                        })?;
-                handle
-                    .bmc
-                    .set_credentials(nv_redfish::bmc_http::BmcCredentials::token(token));
+                match establish_session(&handle.bmc, &bmc_cfg.username, bmc_cfg.password.expose())
+                    .await
+                {
+                    Ok(token) => {
+                        handle
+                            .bmc
+                            .set_credentials(nv_redfish::bmc_http::BmcCredentials::token(token));
+                        handle.session_established.store(true, Ordering::SeqCst);
+                    }
+                    Err(e) => {
+                        warn!(
+                            bmc = %bmc_cfg.name,
+                            error = %e,
+                            "session establishment failed, falling back to basic auth"
+                        );
+                    }
+                }
             }
             bmcs.push(handle);
         }
@@ -80,8 +86,27 @@ impl Scraper {
             let username = handle.username.clone();
             let password = handle.password.clone();
             let auth = handle.auth;
+            let session_established = Arc::clone(&handle.session_established);
             set.spawn(async move {
                 let result = match with_deadline(timeout, async {
+                    if auth == AuthMethod::Session
+                        && !session_established.load(Ordering::SeqCst)
+                    {
+                        if let Ok(token) =
+                            establish_session(&bmc, &username, password.expose()).await
+                        {
+                            bmc.set_credentials(nv_redfish::bmc_http::BmcCredentials::token(
+                                token,
+                            ));
+                            session_established.store(true, Ordering::SeqCst);
+                            info!(bmc = %name, "session established on first round");
+                        } else {
+                            warn!(
+                                bmc = %name,
+                                "session establishment failed, continuing with basic auth"
+                            );
+                        }
+                    }
                     match collect_all(Arc::clone(&bmc), &name).await {
                         Ok(report) => Ok(report),
                         Err(err) if auth == AuthMethod::Session && is_unauthorized(&err) => {
