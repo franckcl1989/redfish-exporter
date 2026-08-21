@@ -144,12 +144,34 @@ where
         .transpose()
 }
 
+/// 生成 BMC 凭据对应的环境变量名后缀：name 大写、非字母数字替换为 `_`。
+/// 完整变量名：`REDFISH_EXPORTER_PASSWORD_<后缀>`。
+pub fn env_var_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
+    load_config_with_env(path, |key| std::env::var(key).ok())
+}
+
+pub fn load_config_with_env(
+    path: &Path,
+    env_lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Config, ConfigError> {
     let raw: RawConfig = {
         let text = std::fs::read_to_string(path)?;
         serde_yaml_ng::from_str(&text)?
     };
     let mut names = std::collections::HashSet::new();
+    let mut env_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut bmcs = Vec::with_capacity(raw.bmcs.len());
     for b in raw.bmcs {
         if b.name.trim().is_empty() {
@@ -187,11 +209,30 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
                 b.name
             )));
         }
+        let env_name = env_var_name(&b.name);
+        if let Some(prev) = env_names.insert(env_name.clone(), b.name.clone())
+            && prev != b.name
+        {
+            return Err(ConfigError::Invalid(format!(
+                "bmc names '{prev}' and '{}' map to the same env var REDFISH_EXPORTER_PASSWORD_{env_name}",
+                b.name
+            )));
+        }
+        let mut password = b.password;
+        if let Some(env_pw) = env_lookup(&format!("REDFISH_EXPORTER_PASSWORD_{env_name}")) {
+            if env_pw.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "env var REDFISH_EXPORTER_PASSWORD_{env_name} is set but empty"
+                )));
+            }
+            password.zeroize();
+            password = env_pw;
+        }
         bmcs.push(BmcConfig {
             name: b.name,
             host,
             username: b.username,
-            password: SecretString::new(b.password),
+            password: SecretString::new(password),
             auth: b.auth,
             insecure_skip_verify: b.insecure_skip_verify,
             ca_cert_file: b.ca_cert_file,

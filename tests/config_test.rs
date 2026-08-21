@@ -1,4 +1,4 @@
-use redfish_exporter::config::{AuthMethod, ConfigError, load_config};
+use redfish_exporter::config::{AuthMethod, ConfigError, load_config, load_config_with_env};
 use std::io::Write;
 
 fn write_tmp(name: &str, content: &str) -> std::path::PathBuf {
@@ -171,4 +171,55 @@ fn default_listen_addr_is_localhost() {
     );
     let cfg = load_config(&p).unwrap();
     assert_eq!(cfg.listen_addr, "127.0.0.1:9417".parse().unwrap());
+}
+
+#[test]
+fn env_var_overrides_password() {
+    let p = write_tmp(
+        "env_override",
+        "bmcs:\n  - { name: my-bmc, host: https://h1, username: u, password: \"filepw\" }\n",
+    );
+    let cfg = load_config_with_env(&p, |k| {
+        (k == "REDFISH_EXPORTER_PASSWORD_MY_BMC").then(|| "envpw".to_string())
+    })
+    .unwrap();
+    assert_eq!(cfg.bmcs[0].password.expose(), "envpw");
+}
+
+#[test]
+fn env_var_absent_keeps_file_password() {
+    let p = write_tmp(
+        "env_absent",
+        "bmcs:\n  - { name: my-bmc, host: https://h1, username: u, password: \"filepw\" }\n",
+    );
+    let cfg = load_config_with_env(&p, |_| None).unwrap();
+    assert_eq!(cfg.bmcs[0].password.expose(), "filepw");
+}
+
+#[test]
+fn empty_env_var_is_rejected() {
+    let p = write_tmp(
+        "env_empty",
+        "bmcs:\n  - { name: my-bmc, host: https://h1, username: u, password: \"filepw\" }\n",
+    );
+    let res = load_config_with_env(&p, |k| {
+        (k == "REDFISH_EXPORTER_PASSWORD_MY_BMC").then(String::new)
+    });
+    assert!(matches!(res, Err(ConfigError::Invalid(_))));
+}
+
+#[test]
+fn colliding_env_names_are_rejected() {
+    let p = write_tmp(
+        "env_collide",
+        r#"
+bmcs:
+  - { name: a-b, host: https://h1, username: u, password: "p" }
+  - { name: a_b, host: https://h2, username: u, password: "p" }
+"#,
+    );
+    assert!(matches!(
+        load_config_with_env(&p, |_| None),
+        Err(ConfigError::Invalid(_))
+    ));
 }
