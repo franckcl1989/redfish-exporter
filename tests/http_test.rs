@@ -21,6 +21,7 @@ async fn metrics_endpoint_returns_cached_snapshot() {
             ],
             failed_resources: vec![],
         },
+        0,
     )
     .await
     .unwrap();
@@ -60,6 +61,7 @@ async fn two_bmcs_both_served() {
             ],
             failed_resources: vec![],
         },
+        0,
     )
     .await
     .unwrap();
@@ -73,6 +75,7 @@ async fn two_bmcs_both_served() {
             ],
             failed_resources: vec![],
         },
+        0,
     )
     .await
     .unwrap();

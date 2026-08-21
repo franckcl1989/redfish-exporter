@@ -573,7 +573,7 @@ async fn full_scrape_cycle_with_mock_bmc() {
     );
 
     // 端到端：ScrapeReport → prometheus Registry → 文本编码
-    let registry = build_registry("bmc1", &report).await.unwrap();
+    let registry = build_registry("bmc1", &report, 0).await.unwrap();
     let out = encode(&registry);
     assert!(out.contains("redfish_up{bmc=\"bmc1\"} 1"));
     assert!(out.contains("redfish_power_consumption_watts"));

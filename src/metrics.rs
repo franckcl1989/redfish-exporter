@@ -4,6 +4,11 @@ pub const UP: (&str, &str) = (
     "redfish_up",
     "Whether the last scrape of this BMC succeeded",
 );
+pub const BUILD_INFO: (&str, &str) = ("redfish_build_info", "Build information");
+pub const SCRAPE_ERRORS_TOTAL: (&str, &str) = (
+    "redfish_scrape_errors_total",
+    "Total number of failed resources across all scrape rounds",
+);
 pub const SCRAPE_DURATION: (&str, &str) = (
     "redfish_scrape_duration_seconds",
     "Duration of the last scrape of this BMC",

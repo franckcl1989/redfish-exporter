@@ -7,6 +7,31 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[tokio::test]
+async fn registry_includes_build_info_and_error_total() {
+    let reg = build_registry(
+        "bmc1",
+        &ScrapeReport {
+            metrics: vec![],
+            failed_resources: vec!["sensors".into()],
+        },
+        3,
+    )
+    .await
+    .unwrap();
+    let out = encode(&reg);
+    assert!(out.contains("redfish_build_info"));
+    assert!(out.contains("redfish_scrape_errors_total{bmc=\"bmc1\"} 3"));
+}
+
+#[tokio::test]
+async fn snapshot_tracks_scrape_errors() {
+    let snap = Snapshot::new();
+    snap.record_scrape_errors("bmc1", 2);
+    snap.record_scrape_errors("bmc1", 1);
+    assert_eq!(snap.scrape_errors("bmc1"), 3);
+}
+
+#[tokio::test]
 async fn snapshot_atomic_update_and_read() {
     let snap = Snapshot::new();
     assert!(snap.is_empty());
@@ -21,6 +46,7 @@ async fn snapshot_atomic_update_and_read() {
             ],
             failed_resources: vec![],
         },
+        0,
     )
     .await
     .unwrap();
@@ -39,6 +65,7 @@ async fn build_registry_includes_error_metrics() {
             metrics: vec![],
             failed_resources: vec!["sensors".into()],
         },
+        0,
     )
     .await
     .unwrap();

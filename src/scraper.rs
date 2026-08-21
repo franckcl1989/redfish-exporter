@@ -171,19 +171,23 @@ impl Scraper {
         }
         while let Some(res) = set.join_next().await {
             match res {
-                Ok((name, Ok(report))) => match build_registry(&name, &report).await {
-                    Ok(reg) => {
-                        self.snapshot.update(&name, reg);
-                        info!(
-                            bmc = %name,
-                            failed = report.failed_resources.len(),
-                            "scrape complete"
-                        );
+                Ok((name, Ok(report))) => {
+                    let n = report.failed_resources.len() as u64;
+                    self.snapshot.record_scrape_errors(&name, n);
+                    match build_registry(&name, &report, self.snapshot.scrape_errors(&name)).await {
+                        Ok(reg) => {
+                            self.snapshot.update(&name, reg);
+                            info!(
+                                bmc = %name,
+                                failed = report.failed_resources.len(),
+                                "scrape complete"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(bmc = %name, error = %e, "failed to build registry");
+                        }
                     }
-                    Err(e) => {
-                        warn!(bmc = %name, error = %e, "failed to build registry");
-                    }
-                },
+                }
                 Ok((name, Err(e))) => {
                     let timed_out = e.contains("timeout");
                     let report = ScrapeReport {
@@ -198,7 +202,8 @@ impl Scraper {
                             vec!["bmc".to_string()]
                         },
                     };
-                    match build_registry(&name, &report).await {
+                    self.snapshot.record_scrape_errors(&name, 1);
+                    match build_registry(&name, &report, self.snapshot.scrape_errors(&name)).await {
                         Ok(reg) => self.snapshot.update(&name, reg),
                         Err(e) => {
                             warn!(bmc = %name, error = %e, "failed to build registry");
