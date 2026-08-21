@@ -707,6 +707,6 @@ async fn session_auth_flow() {
         "/redfish/v1/SessionService/Sessions/1",
     ));
 
-    let token = establish_session(&bmc, "admin", "secret").await.unwrap();
-    assert_eq!(token, "session-token-123");
+    let est = establish_session(&bmc, "admin", "secret").await.unwrap();
+    assert_eq!(est.token, "session-token-123");
 }

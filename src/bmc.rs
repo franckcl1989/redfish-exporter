@@ -86,7 +86,13 @@ pub fn make_bmc(cfg: &BmcConfig, client: ReqwestClient) -> BmcHandle {
     }
 }
 
-/// 建立 Redfish 会话并返回会话 token。
+/// 建会话的返回值：token 供调用方应用，session 供 shutdown 时删除。
+pub struct EstablishedSession<B: nv_redfish::Bmc> {
+    pub token: String,
+    pub session: Option<Arc<nv_redfish::session_service::Session<B>>>,
+}
+
+/// 建立 Redfish 会话并返回会话 token 与可删除的会话句柄。
 ///
 /// 泛型 `<B: nv_redfish::Bmc>`：token 的写回（`HttpBmc::set_credentials`）
 /// 是 `HttpBmc` 特有能力，`nv_redfish::Bmc` trait 无凭据概念，
@@ -96,7 +102,7 @@ pub async fn establish_session<B: nv_redfish::Bmc>(
     bmc: &Arc<B>,
     username: &str,
     password: &str,
-) -> Result<String, BmcError> {
+) -> Result<EstablishedSession<B>, BmcError> {
     let root = nv_redfish::ServiceRoot::new(Arc::clone(bmc))
         .await
         .map_err(|e| BmcError::Session(format!("service root: {e}")))?;
@@ -130,5 +136,8 @@ pub async fn establish_session<B: nv_redfish::Bmc>(
             "session response without auth token".into(),
         ));
     };
-    Ok(token.to_string())
+    Ok(EstablishedSession {
+        token: token.to_string(),
+        session: Some(Arc::new(session)),
+    })
 }

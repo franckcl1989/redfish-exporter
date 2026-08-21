@@ -23,8 +23,11 @@ pub async fn with_deadline<T>(timeout: Duration, fut: impl Future<Output = T>) -
 }
 
 type ConcreteBmc = HttpBmc<ReqwestClient>;
+type ConcreteSession = nv_redfish::session_service::Session<ConcreteBmc>;
 /// 每 BMC 慢组最近采集时间与结果缓存（跨轮复用）。
 type SlowState = Arc<Mutex<HashMap<String, (Instant, Option<ScrapeReport>)>>>;
+/// 已建立会话（仅 session 认证 BMC），shutdown 时删除。
+type SessionStore = Arc<Mutex<HashMap<String, Option<Arc<ConcreteSession>>>>>;
 
 pub struct Scraper {
     bmcs: Vec<BmcHandle>,
@@ -32,12 +35,14 @@ pub struct Scraper {
     timeout: Duration,
     slow_interval: Option<Duration>,
     slow_state: SlowState,
+    sessions: SessionStore,
     snapshot: Arc<Snapshot>,
 }
 
 impl Scraper {
     /// 为每个 BMC 建立 HTTP client 与 handle；Session 认证时先建会话。
     pub async fn new(cfg: &Config, snapshot: Arc<Snapshot>) -> Result<Self, anyhow::Error> {
+        let sessions: SessionStore = Arc::new(Mutex::new(HashMap::new()));
         let mut bmcs = Vec::with_capacity(cfg.bmcs.len());
         for bmc_cfg in &cfg.bmcs {
             let client = build_http_client(bmc_cfg, cfg.request_timeout)?;
@@ -46,11 +51,17 @@ impl Scraper {
                 match establish_session(&handle.bmc, &bmc_cfg.username, bmc_cfg.password.expose())
                     .await
                 {
-                    Ok(token) => {
+                    Ok(est) => {
                         handle
                             .bmc
-                            .set_credentials(nv_redfish::bmc_http::BmcCredentials::token(token));
+                            .set_credentials(nv_redfish::bmc_http::BmcCredentials::token(
+                                est.token,
+                            ));
                         handle.session_established.store(true, Ordering::SeqCst);
+                        sessions
+                            .lock()
+                            .unwrap()
+                            .insert(bmc_cfg.name.clone(), est.session);
                     }
                     Err(e) => {
                         warn!(
@@ -69,6 +80,7 @@ impl Scraper {
             timeout: cfg.scrape_timeout,
             slow_interval: cfg.slow_interval,
             slow_state: Arc::new(Mutex::new(HashMap::new())),
+            sessions,
             snapshot,
         })
     }
@@ -80,7 +92,23 @@ impl Scraper {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
-                    _ = stop.changed() => break,
+                    _ = stop.changed() => {
+                        // graceful shutdown：删除已建立会话，避免 BMC 侧会话泄漏。
+                        // 先取出全部会话再 await，避免持锁跨 await。
+                        let to_delete = self
+                            .sessions
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .filter_map(|(n, s)| s.as_ref().map(|s| (n.clone(), Arc::clone(s))))
+                            .collect::<Vec<_>>();
+                        for (name, s) in to_delete {
+                            if let Err(e) = s.delete().await {
+                                warn!(bmc = %name, error = %e, "session cleanup failed");
+                            }
+                        }
+                        break;
+                    }
                     _ = interval.tick() => {}
                 }
                 self.scrape_once().await;
@@ -94,6 +122,7 @@ impl Scraper {
         let timeout = self.timeout;
         let slow_interval = self.slow_interval;
         let slow_state = Arc::clone(&self.slow_state);
+        let sessions = Arc::clone(&self.sessions);
         let mut set = tokio::task::JoinSet::new();
         for handle in &self.bmcs {
             let name = handle.name.clone();
@@ -103,18 +132,20 @@ impl Scraper {
             let auth = handle.auth;
             let session_established = Arc::clone(&handle.session_established);
             let slow_state = Arc::clone(&slow_state);
+            let sessions = Arc::clone(&sessions);
             set.spawn(async move {
                 let result = match with_deadline(timeout, async {
                     if auth == AuthMethod::Session
                         && !session_established.load(Ordering::SeqCst)
                     {
-                        if let Ok(token) =
+                        if let Ok(est) =
                             establish_session(&bmc, &username, password.expose()).await
                         {
                             bmc.set_credentials(nv_redfish::bmc_http::BmcCredentials::token(
-                                token,
+                                est.token,
                             ));
                             session_established.store(true, Ordering::SeqCst);
+                            sessions.lock().unwrap().insert(name.clone(), est.session);
                             info!(bmc = %name, "session established on first round");
                         } else {
                             warn!(
@@ -135,10 +166,13 @@ impl Scraper {
                         Err(err) if auth == AuthMethod::Session && is_unauthorized(&err) => {
                             info!(bmc = %name, "session rejected with 401, re-establishing session");
                             match establish_session(&bmc, &username, password.expose()).await {
-                                Ok(token) => {
+                                Ok(est) => {
                                     bmc.set_credentials(
-                                        nv_redfish::bmc_http::BmcCredentials::token(token),
+                                        nv_redfish::bmc_http::BmcCredentials::token(est.token),
                                     );
+                                    // 旧会话已因 401 过期（token 失效），无需 delete 清理；
+                                    // 仅更新存储的会话句柄供 shutdown 删除。
+                                    sessions.lock().unwrap().insert(name.clone(), est.session);
                                     info!(bmc = %name, "session re-established, retrying scrape");
                                     collect_round(
                                         Arc::clone(&bmc),

@@ -87,8 +87,108 @@ async fn try_establish_session_failure_returns_err_not_panic() {
         "/redfish/v1/SessionService/Sessions/1",
     ));
 
-    let err = establish_session(&bmc, "admin", "secret")
-        .await
-        .unwrap_err();
+    let err = match establish_session(&bmc, "admin", "secret").await {
+        Err(e) => e,
+        Ok(_) => unreachable!("create_session 预期失败"),
+    };
     assert!(matches!(err, BmcError::Session(_)));
+}
+
+/// establish_session 成功时返回 token 与可删除的会话句柄。
+#[tokio::test]
+async fn establish_session_returns_token_and_session() {
+    let bmc = Arc::new(Mock::default());
+    bmc.expect(Expect::get(
+        ODataId::service_root(),
+        json!({
+            "@odata.id": "/redfish/v1",
+            "Id": "Root", "Name": "Root", "RedfishVersion": "1.0.0",
+            "Links": { "Sessions": { "@odata.id": "/redfish/v1/SessionService/Sessions" } },
+            "SessionService": { "@odata.id": "/redfish/v1/SessionService" },
+        }),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/SessionService",
+        json!({
+            "@odata.id": "/redfish/v1/SessionService",
+            "Id": "SessionService", "Name": "Session Service",
+            "Sessions": { "@odata.id": "/redfish/v1/SessionService/Sessions" },
+        }),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/SessionService/Sessions",
+        json!({
+            "@odata.id": "/redfish/v1/SessionService/Sessions",
+            "@odata.type": "#SessionCollection.SessionCollection",
+            "Name": "Sessions",
+            "Members": [],
+            "Members@odata.count": 0,
+        }),
+    ));
+    bmc.expect(Expect::create_session(
+        "/redfish/v1/SessionService/Sessions",
+        json!({ "UserName": "admin", "Password": "secret" }),
+        json!({
+            "@odata.id": "/redfish/v1/SessionService/Sessions/1",
+            "Id": "1", "Name": "User Session",
+            "UserName": "admin",
+            "SessionType": "Redfish",
+        }),
+        "session-token-123",
+        "/redfish/v1/SessionService/Sessions/1",
+    ));
+
+    let est = establish_session(&bmc, "admin", "secret").await.unwrap();
+    assert_eq!(est.token, "session-token-123");
+    assert!(est.session.is_some());
+}
+
+/// 会话句柄的 delete() 对会话 URI 发起 DELETE 请求。
+#[tokio::test]
+async fn session_delete_issues_delete_request() {
+    let bmc = Arc::new(Mock::default());
+    bmc.expect(Expect::get(
+        ODataId::service_root(),
+        json!({
+            "@odata.id": "/redfish/v1",
+            "Id": "Root", "Name": "Root", "RedfishVersion": "1.0.0",
+            "Links": { "Sessions": { "@odata.id": "/redfish/v1/SessionService/Sessions" } },
+            "SessionService": { "@odata.id": "/redfish/v1/SessionService" },
+        }),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/SessionService",
+        json!({
+            "@odata.id": "/redfish/v1/SessionService",
+            "Id": "SessionService", "Name": "Session Service",
+            "Sessions": { "@odata.id": "/redfish/v1/SessionService/Sessions" },
+        }),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/SessionService/Sessions",
+        json!({
+            "@odata.id": "/redfish/v1/SessionService/Sessions",
+            "@odata.type": "#SessionCollection.SessionCollection",
+            "Name": "Sessions",
+            "Members": [],
+            "Members@odata.count": 0,
+        }),
+    ));
+    bmc.expect(Expect::create_session(
+        "/redfish/v1/SessionService/Sessions",
+        json!({ "UserName": "admin", "Password": "secret" }),
+        json!({
+            "@odata.id": "/redfish/v1/SessionService/Sessions/1",
+            "Id": "1", "Name": "User Session",
+            "UserName": "admin",
+            "SessionType": "Redfish",
+        }),
+        "session-token-123",
+        "/redfish/v1/SessionService/Sessions/1",
+    ));
+    bmc.expect(Expect::delete("/redfish/v1/SessionService/Sessions/1"));
+
+    let est = establish_session(&bmc, "admin", "secret").await.unwrap();
+    let res = est.session.unwrap().delete().await.unwrap();
+    assert!(matches!(res, nv_redfish::core::ModificationResponse::Empty));
 }
