@@ -15,7 +15,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
+use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
+use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tower::ServiceExt;
 use url::Url;
 
@@ -569,4 +572,67 @@ async fn header_read_timeout_closes_idle_connection() {
     assert!(elapsed < Duration::from_secs(5), "timeout took {elapsed:?}");
     let _ = tx.send(true);
     handle.await.unwrap().unwrap();
+}
+
+// TLS 模式下的零字节慢连接：完成 TLS 握手后不发送任何字节，
+// header 读超时同样必须在 ~300ms 内关闭连接（与纯 HTTP 分支语义一致）。
+#[tokio::test]
+async fn tls_header_read_timeout_closes_idle_connection() {
+    let dir = temp_config_dir();
+    let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+    let cert_path = dir.join("cert.pem");
+    let key_path = dir.join("key.pem");
+    std::fs::write(&cert_path, cert.cert.pem()).unwrap();
+    std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
+    let web = WebConfig {
+        auth_token: None,
+        tls_cert_file: Some(cert_path),
+        tls_key_file: Some(key_path),
+    };
+    let tls = redfish_exporter::http::load_tls(&web)
+        .await
+        .unwrap()
+        .expect("tls loaded");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let snap = Arc::new(Snapshot::new());
+    let app = test_router(snap, test_config(&[("bmc1", "https://10.0.0.1")]));
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let handle = tokio::spawn(async move {
+        redfish_exporter::http::serve_on(listener, app, Some(tls), Duration::from_millis(300), rx)
+            .await
+    });
+    // 信任自签证书的 TLS 客户端
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(cert.cert.der().to_vec()))
+        .unwrap();
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut stream = connector
+        .connect(ServerName::try_from("127.0.0.1".to_string()).unwrap(), tcp)
+        .await
+        .unwrap();
+    // 握手完成后不发送任何字节，等待服务端关闭
+    let mut buf = [0u8; 16];
+    let started = std::time::Instant::now();
+    let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await;
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(5), "timeout took {elapsed:?}");
+    let closed = match n {
+        // 干净关闭（close_notify）或意外 EOF（连接已断开）都视为服务端已关闭
+        Ok(Ok(0)) | Ok(Err(_)) => true,
+        Ok(Ok(_)) => false,
+        Err(_) => false,
+    };
+    assert!(
+        closed,
+        "expected connection closed by server (EOF), got {n:?}"
+    );
+    let _ = tx.send(true);
+    handle.await.unwrap().unwrap();
+    cleanup(&dir);
 }

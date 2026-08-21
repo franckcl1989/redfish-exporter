@@ -155,6 +155,11 @@ pub async fn load_tls(web: &crate::config::WebConfig) -> anyhow::Result<Option<R
                         key.display()
                     )
                 })?;
+            // 服务端固定 HTTP/1.1（见 http1_server），ALPN 不再声明 h2，
+            // 避免客户端协商到服务端不支持的协议。
+            let mut server_config = (*cfg.get_inner()).clone();
+            server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            cfg.reload_from_config(Arc::new(server_config));
             Ok(Some(cfg))
         }
         (None, None) => Ok(None),
@@ -183,41 +188,41 @@ pub async fn serve_on(
         shutdown_handle.graceful_shutdown(None);
     });
     match tls {
-        // TLS 模式保留 HTTP/1.1 + HTTP/2 自动协商：握手阶段由 RustlsAcceptor
-        // 的 10s 握手超时防护，握手完成后 header 读超时生效。
-        Some(cfg) => {
-            let mut server = axum_server::from_tcp_rustls(listener, cfg)
-                .context("failed to start TLS server")?;
-            server
-                .http_builder()
-                .http1()
-                .timer(hyper_util::rt::TokioTimer::new())
-                .header_read_timeout(Some(header_read_timeout));
-            server
-                .handle(handle)
-                .serve(router.into_make_service())
-                .await
-                .context("http server error")
-        }
-        // 纯 HTTP 固定 HTTP/1.1：hyper-util 的版本探测阶段（读前 24 字节区分
-        // h2 前言）没有超时，若不固定则"连接后零字节"的慢连接（slowloris）
-        // 永远不会被关闭，header 读超时无法生效。
-        None => {
-            let mut server = axum_server::from_tcp(listener)
-                .context("failed to start server")?
-                .http1_only();
-            server
-                .http_builder()
-                .http1()
-                .timer(hyper_util::rt::TokioTimer::new())
-                .header_read_timeout(Some(header_read_timeout));
-            server
-                .handle(handle)
-                .serve(router.into_make_service())
-                .await
-                .context("http server error")
-        }
+        // TLS 与纯 HTTP 语义一致：header 读超时覆盖"握手/连接后零字节"的慢连接。
+        Some(cfg) => http1_server(
+            axum_server::from_tcp_rustls(listener, cfg).context("failed to start TLS server")?,
+            header_read_timeout,
+        )
+        .handle(handle)
+        .serve(router.into_make_service())
+        .await
+        .context("http server error"),
+        None => http1_server(
+            axum_server::from_tcp(listener).context("failed to start server")?,
+            header_read_timeout,
+        )
+        .handle(handle)
+        .serve(router.into_make_service())
+        .await
+        .context("http server error"),
     }
+}
+
+/// 固定 HTTP/1.1 并配置 header 读超时（慢连接防护）。两种模式共用：
+/// hyper-util 的版本探测阶段（读前 24 字节区分 h2 前言）没有超时，
+/// 若不固定，则"握手/连接后零字节"的慢连接（slowloris）永远不会被关闭。
+/// 代价：不再服务 h2/h2c（Prometheus 走 HTTP/1.1）。
+fn http1_server<Acc>(
+    mut server: axum_server::Server<std::net::SocketAddr, Acc>,
+    header_read_timeout: Duration,
+) -> axum_server::Server<std::net::SocketAddr, Acc> {
+    server = server.http1_only();
+    server
+        .http_builder()
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(Some(header_read_timeout));
+    server
 }
 
 /// 绑定 `cfg.listen_addr` 并启动 HTTP 服务；`stop` 触发后优雅关闭。

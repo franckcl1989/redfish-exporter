@@ -1216,6 +1216,7 @@ dependencies = [
  "serde_yaml_ng",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tracing",
  "tracing-subscriber",
