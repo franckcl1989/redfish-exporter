@@ -143,6 +143,31 @@ async fn establish_session_returns_token_and_session() {
     assert!(est.session.is_some());
 }
 
+#[test]
+fn redirect_policy_blocks_https_downgrade() {
+    use redfish_exporter::bmc::decide_redirect;
+    let https = url::Url::parse("https://bmc.example/redfish/v1").unwrap();
+    let http = url::Url::parse("http://bmc.example/redfish/v1/Systems").unwrap();
+    let https2 = url::Url::parse("https://bmc.example/redfish/v1/Systems").unwrap();
+    assert!(
+        !decide_redirect(std::slice::from_ref(&https), &http),
+        "https->http must be blocked"
+    );
+    assert!(decide_redirect(&[https], &https2), "https->https allowed");
+    assert!(
+        decide_redirect(std::slice::from_ref(&http), &http),
+        "http->http allowed"
+    );
+    assert!(
+        decide_redirect(&[], &http),
+        "no previous hop is not a downgrade"
+    );
+    let chain: Vec<url::Url> = (0..10)
+        .map(|i| url::Url::parse(&format!("https://bmc.example/r{i}")).unwrap())
+        .collect();
+    assert!(!decide_redirect(&chain, &http), "10-hop limit enforced");
+}
+
 /// 会话句柄的 delete() 对会话 URI 发起 DELETE 请求。
 #[tokio::test]
 async fn session_delete_issues_delete_request() {

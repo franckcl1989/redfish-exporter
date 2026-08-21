@@ -1,4 +1,5 @@
 use anyhow::Context;
+use reqwest::redirect::Policy;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -43,6 +44,30 @@ pub fn is_unauthorized(err: &nv_redfish::Error<HttpBmc<ReqwestClient>>) -> bool 
     )
 }
 
+/// 判定一次重定向是否放行：拒绝 https→http 降级；最多 10 跳（与 reqwest 默认一致）。
+/// 独立为纯函数便于单元测试（与 scraper 的 slow_due 同法）。
+pub fn decide_redirect(previous: &[url::Url], next: &url::Url) -> bool {
+    if previous.len() >= 10 {
+        return false;
+    }
+    !matches!(
+        previous.last(),
+        Some(prev) if prev.scheme() == "https" && next.scheme() == "http"
+    )
+}
+
+/// 出站重定向策略：阻止 TLS 降级（https→http），其余按 10 跳上限跟随。
+/// 注意：reqwest 自定义 policy 不自动限制跳数（文档明确），故跳数上限在 decide_redirect 内实现。
+pub fn no_downgrade_redirect() -> Policy {
+    Policy::custom(|attempt| {
+        if decide_redirect(attempt.previous(), attempt.url()) {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
 pub fn build_http_client(
     cfg: &BmcConfig,
     request_timeout: Duration,
@@ -50,7 +75,8 @@ pub fn build_http_client(
     let mut builder = reqwest::Client::builder()
         .timeout(request_timeout)
         .connect_timeout(std::time::Duration::from_secs(5))
-        .user_agent("nv-redfish/v1");
+        .user_agent("nv-redfish/v1")
+        .redirect(no_downgrade_redirect());
     if cfg.insecure_skip_verify {
         builder = builder.danger_accept_invalid_certs(true);
     }
