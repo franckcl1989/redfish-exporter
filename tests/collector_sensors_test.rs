@@ -1,8 +1,8 @@
 use nv_redfish::ServiceRoot;
 use nv_redfish::core::ODataId;
 use nv_redfish_bmc_mock::{Bmc as MockBmc, Expect};
-use redfish_exporter::collector::collect_all;
 use redfish_exporter::collector::sensors::collect_chassis_sensors;
+use redfish_exporter::collector::{collect_fast, collect_slow, finalize_report, merge_reports};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -214,7 +214,7 @@ async fn all_sensor_fetches_failing_returns_err() {
 }
 
 #[tokio::test]
-async fn collect_all_reports_up_duration_and_sensor_metrics() {
+async fn collect_groups_reports_up_duration_and_sensor_metrics() {
     let bmc = Arc::new(Mock::default());
     expect_service_root(&bmc);
     expect_chassis_collection(&bmc);
@@ -289,7 +289,16 @@ async fn collect_all_reports_up_duration_and_sensor_metrics() {
         }),
     ));
 
-    let report = collect_all(bmc, "bmc1").await.unwrap();
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let fast = collect_fast(Arc::clone(&bmc), &root, "bmc1").await.unwrap();
+    let slow = collect_slow(Arc::clone(&bmc), &root, "bmc1").await.unwrap();
+    let merged = merge_reports(fast, Some(&slow));
+    let report = finalize_report(
+        "bmc1",
+        merged.metrics,
+        merged.failed_resources,
+        std::time::Instant::now(),
+    );
     assert!(report.failed_resources.is_empty());
     assert!(
         report

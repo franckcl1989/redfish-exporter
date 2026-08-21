@@ -1,4 +1,5 @@
 use redfish_exporter::collector::ScrapeReport;
+use redfish_exporter::collector::merge_reports;
 use redfish_exporter::metrics::{Metric, encode};
 use redfish_exporter::registry::{Snapshot, build_registry};
 use std::sync::Arc;
@@ -68,4 +69,19 @@ async fn with_deadline_completes_in_time() {
     use std::time::Duration;
     let ok = async { 7 };
     assert_eq!(with_deadline(Duration::from_secs(1), ok).await, Some(7));
+}
+
+#[tokio::test]
+async fn merge_reports_combines_metrics_and_failed() {
+    let fast = ScrapeReport {
+        metrics: vec![Metric::gauge("a", "a").label("bmc", "b".into()).build(1.0)],
+        failed_resources: vec!["sensors".into()],
+    };
+    let slow = ScrapeReport {
+        metrics: vec![Metric::gauge("b", "b").label("bmc", "b".into()).build(2.0)],
+        failed_resources: vec!["storage".into(), "sensors".into()],
+    };
+    let merged = merge_reports(fast, Some(&slow));
+    assert_eq!(merged.metrics.len(), 2);
+    assert_eq!(merged.failed_resources, vec!["sensors", "storage"]);
 }

@@ -58,6 +58,7 @@ pub const LINK_SPEED: (&str, &str) = (
     "Ethernet link speed in Mbps",
 );
 
+#[derive(Clone)]
 pub struct Metric {
     pub name: &'static str,
     pub help: &'static str,

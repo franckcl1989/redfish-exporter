@@ -1,13 +1,18 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::bmc::{BmcHandle, build_http_client, establish_session, is_unauthorized, make_bmc};
-use crate::collector::{ScrapeReport, collect_all};
+use crate::bmc::{
+    BmcHandle, HttpBmc, ReqwestClient, build_http_client, establish_session, is_unauthorized,
+    make_bmc,
+};
+use crate::collector::{ScrapeReport, collect_fast, collect_slow, finalize_report, merge_reports};
 use crate::config::{AuthMethod, Config};
 use crate::metrics::{Metric, UP};
 use crate::registry::{Snapshot, build_registry};
@@ -17,10 +22,16 @@ pub async fn with_deadline<T>(timeout: Duration, fut: impl Future<Output = T>) -
     tokio::time::timeout(timeout, fut).await.ok()
 }
 
+type ConcreteBmc = HttpBmc<ReqwestClient>;
+/// 每 BMC 慢组最近采集时间与结果缓存（跨轮复用）。
+type SlowState = Arc<Mutex<HashMap<String, (Instant, Option<ScrapeReport>)>>>;
+
 pub struct Scraper {
     bmcs: Vec<BmcHandle>,
     interval: Duration,
     timeout: Duration,
+    slow_interval: Option<Duration>,
+    slow_state: SlowState,
     snapshot: Arc<Snapshot>,
 }
 
@@ -56,6 +67,8 @@ impl Scraper {
             bmcs,
             interval: cfg.scrape_interval,
             timeout: cfg.scrape_timeout,
+            slow_interval: cfg.slow_interval,
+            slow_state: Arc::new(Mutex::new(HashMap::new())),
             snapshot,
         })
     }
@@ -79,6 +92,8 @@ impl Scraper {
         let started = Instant::now();
         let bmc_count = self.bmcs.len();
         let timeout = self.timeout;
+        let slow_interval = self.slow_interval;
+        let slow_state = Arc::clone(&self.slow_state);
         let mut set = tokio::task::JoinSet::new();
         for handle in &self.bmcs {
             let name = handle.name.clone();
@@ -87,6 +102,7 @@ impl Scraper {
             let password = handle.password.clone();
             let auth = handle.auth;
             let session_established = Arc::clone(&handle.session_established);
+            let slow_state = Arc::clone(&slow_state);
             set.spawn(async move {
                 let result = match with_deadline(timeout, async {
                     if auth == AuthMethod::Session
@@ -107,7 +123,14 @@ impl Scraper {
                             );
                         }
                     }
-                    match collect_all(Arc::clone(&bmc), &name).await {
+                    match collect_round(
+                        Arc::clone(&bmc),
+                        &name,
+                        slow_interval,
+                        Arc::clone(&slow_state),
+                    )
+                    .await
+                    {
                         Ok(report) => Ok(report),
                         Err(err) if auth == AuthMethod::Session && is_unauthorized(&err) => {
                             info!(bmc = %name, "session rejected with 401, re-establishing session");
@@ -117,7 +140,13 @@ impl Scraper {
                                         nv_redfish::bmc_http::BmcCredentials::token(token),
                                     );
                                     info!(bmc = %name, "session re-established, retrying scrape");
-                                    collect_all(Arc::clone(&bmc), &name).await
+                                    collect_round(
+                                        Arc::clone(&bmc),
+                                        &name,
+                                        slow_interval,
+                                        Arc::clone(&slow_state),
+                                    )
+                                    .await
                                 }
                                 Err(e) => {
                                     warn!(
@@ -192,4 +221,61 @@ impl Scraper {
             "scrape round complete"
         );
     }
+}
+
+/// 单 BMC 单轮：快组必采，慢组按 slow_interval 到期才采（结果缓存跨轮复用）。
+/// 返回 nv_redfish::Error 而非 String，供 401 重登/404 判定直接匹配状态码。
+async fn collect_round(
+    bmc: Arc<ConcreteBmc>,
+    name: &str,
+    slow_interval: Option<Duration>,
+    slow_state: SlowState,
+) -> Result<ScrapeReport, nv_redfish::Error<ConcreteBmc>> {
+    let root = nv_redfish::ServiceRoot::new(Arc::clone(&bmc)).await?;
+    let started = Instant::now();
+    let fast = match collect_fast(Arc::clone(&bmc), &root, name).await {
+        Ok(r) => r,
+        Err(resource) => ScrapeReport {
+            metrics: vec![],
+            failed_resources: vec![resource],
+        },
+    };
+    let mut slow_report = slow_state
+        .lock()
+        .unwrap()
+        .get(name)
+        .and_then(|(_, r)| r.clone());
+    let slow_due = match slow_interval {
+        Some(interval) => {
+            let last = slow_state
+                .lock()
+                .unwrap()
+                .get(name)
+                .map(|(t, _)| *t)
+                .unwrap_or(Instant::now() - interval);
+            last.elapsed() >= interval
+        }
+        None => false,
+    };
+    if slow_due {
+        let new_slow = match collect_slow(Arc::clone(&bmc), &root, name).await {
+            Ok(r) => r,
+            Err(resource) => ScrapeReport {
+                metrics: vec![],
+                failed_resources: vec![resource],
+            },
+        };
+        slow_report = Some(new_slow.clone());
+        slow_state
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), (Instant::now(), Some(new_slow)));
+    }
+    let merged = merge_reports(fast, slow_report.as_ref());
+    Ok(finalize_report(
+        name,
+        merged.metrics,
+        merged.failed_resources,
+        started,
+    ))
 }

@@ -47,6 +47,7 @@ pub struct BmcConfig {
 pub struct Config {
     pub listen_addr: SocketAddr,
     pub scrape_interval: Duration,
+    pub slow_interval: Option<Duration>,
     pub scrape_timeout: Duration,
     pub request_timeout: Duration,
     pub bmcs: Vec<BmcConfig>,
@@ -86,6 +87,11 @@ struct RawConfig {
     )]
     scrape_interval: Duration,
     #[serde(
+        default = "default_none_duration",
+        deserialize_with = "deserialize_optional_duration"
+    )]
+    slow_interval: Option<Duration>,
+    #[serde(
         default = "default_scrape_timeout",
         deserialize_with = "deserialize_duration"
     )]
@@ -105,6 +111,9 @@ fn default_listen_addr() -> String {
 fn default_interval() -> Duration {
     Duration::from_secs(30)
 }
+fn default_none_duration() -> Option<Duration> {
+    None
+}
 fn default_scrape_timeout() -> Duration {
     Duration::from_secs(15)
 }
@@ -118,6 +127,15 @@ where
 {
     let s = String::deserialize(de)?;
     humantime::parse_duration(&s).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_optional_duration<'de, D>(de: D) -> Result<Option<Duration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(de)?;
+    opt.map(|s| humantime::parse_duration(&s).map_err(serde::de::Error::custom))
+        .transpose()
 }
 
 pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
@@ -171,6 +189,11 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
     if raw.scrape_interval.is_zero() {
         return Err(ConfigError::Invalid("scrape_interval must be > 0".into()));
     }
+    if let Some(si) = raw.slow_interval
+        && si.is_zero()
+    {
+        return Err(ConfigError::Invalid("slow_interval must be > 0".into()));
+    }
     if raw.scrape_timeout.is_zero() {
         return Err(ConfigError::Invalid("scrape_timeout must be > 0".into()));
     }
@@ -180,6 +203,7 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
     Ok(Config {
         listen_addr,
         scrape_interval: raw.scrape_interval,
+        slow_interval: raw.slow_interval,
         scrape_timeout: raw.scrape_timeout,
         request_timeout: raw.request_timeout,
         bmcs,

@@ -1,13 +1,14 @@
 //! 集成测试：完整采集周期、BMC 失败隔离、session 认证流程。
 //!
 //! 全部通过 nv-redfish-bmc-mock 模拟真实 BMC 的 HTTP 行为，验证
-//! collect_all 的 11 个 collector 全链路与 establish_session 的会话流程。
+//! collect_fast/collect_slow 的分组采集链路与 establish_session 的会话流程。
 
+use nv_redfish::ServiceRoot;
 use nv_redfish::core::ODataId;
 use nv_redfish::schema::session::SessionCreate;
 use nv_redfish_bmc_mock::{Bmc as MockBmc, Expect};
 use redfish_exporter::bmc::establish_session;
-use redfish_exporter::collector::collect_all;
+use redfish_exporter::collector::{collect_fast, collect_slow, finalize_report, merge_reports};
 use redfish_exporter::metrics::encode;
 use redfish_exporter::registry::build_registry;
 use serde_json::json;
@@ -406,64 +407,74 @@ fn expect_firmware_payloads(bmc: &Mock) {
     ));
 }
 
-/// 测试 1：一个 MockBmc 覆盖 collect_all 全部 11 个 collector 的调用路径。
+/// 测试 1：一个 MockBmc 覆盖快组（7 个 collector）+ 慢组（4 个 collector）
+/// 的全部调用路径。
 ///
-/// mock expectation 顺序必须与 collect_all 的调用顺序一致（collector/mod.rs）：
-/// sensors → power → processors → memory → storage → network → systems →
-/// chassis_health → managers → assembly → firmware。
+/// mock expectation 顺序必须与实际请求顺序一致：快组
+/// sensors → power → processors → memory → systems → chassis_health → managers，
+/// 慢组 storage → network → firmware → assembly。
 /// managers 因 root 无 Managers 链接而跳过（Ok(None)，无网络请求）。
 #[tokio::test]
 async fn full_scrape_cycle_with_mock_bmc() {
     let bmc = Arc::new(Mock::default());
     expect_service_root(&bmc, &["Chassis", "Systems", "UpdateService"]);
 
-    // sensors（chassis 枚举）
+    // 快组：sensors（chassis 枚举）
     expect_chassis_round(&bmc, true);
     expect_sensor_payloads(&bmc);
 
-    // power（chassis 枚举）
+    // 快组：power（chassis 枚举）
     expect_chassis_round(&bmc, true);
     expect_thermal_power_payloads(&bmc);
 
-    // processors（systems 枚举）
+    // 快组：processors（systems 枚举）
     expect_systems_collection(&bmc);
     expect_system(&bmc, &["Processors"]);
     expect_processor_payloads(&bmc);
 
-    // memory（systems 枚举）
+    // 快组：memory（systems 枚举）
     expect_systems_collection(&bmc);
     expect_system(&bmc, &["Memory"]);
     expect_memory_payloads(&bmc);
 
-    // storage（systems 枚举）
+    // 快组：systems（systems 枚举）
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, &[]);
+
+    // 快组：chassis_health（chassis 枚举）
+    expect_chassis_round(&bmc, true);
+
+    // 快组：managers：root 无 Managers 链接 → 无网络请求
+
+    // 慢组：storage（systems 枚举）
     expect_systems_collection(&bmc);
     expect_system(&bmc, &["Storage"]);
     expect_storage_payloads(&bmc);
 
-    // network：ethernet（systems 枚举）+ pcie（chassis 枚举）
+    // 慢组：network：ethernet（systems 枚举）+ pcie（chassis 枚举）
     expect_systems_collection(&bmc);
     expect_system(&bmc, &["EthernetInterfaces"]);
     expect_ethernet_payloads(&bmc);
     expect_chassis_round(&bmc, true);
     expect_pcie_payloads(&bmc);
 
-    // systems（systems 枚举）
-    expect_systems_collection(&bmc);
-    expect_system(&bmc, &[]);
+    // 慢组：firmware（UpdateService）
+    expect_firmware_payloads(&bmc);
 
-    // chassis_health（chassis 枚举）
-    expect_chassis_round(&bmc, true);
-
-    // managers：root 无 Managers 链接 → 无网络请求
-
-    // assembly（chassis 枚举）
+    // 慢组：assembly（chassis 枚举）
     expect_chassis_round(&bmc, true);
     expect_assembly_payloads(&bmc);
 
-    // firmware（UpdateService）
-    expect_firmware_payloads(&bmc);
-
-    let report = collect_all(bmc, "bmc1").await.unwrap();
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let fast = collect_fast(Arc::clone(&bmc), &root, "bmc1").await.unwrap();
+    let slow = collect_slow(Arc::clone(&bmc), &root, "bmc1").await.unwrap();
+    let merged = merge_reports(fast, Some(&slow));
+    let report = finalize_report(
+        "bmc1",
+        merged.metrics,
+        merged.failed_resources,
+        std::time::Instant::now(),
+    );
     assert!(
         report.failed_resources.is_empty(),
         "failed_resources: {:?}",
@@ -535,19 +546,33 @@ async fn full_scrape_cycle_with_mock_bmc() {
 ///
 /// - 健康 BMC：完整流程成功（redfish_up=1）。
 /// - 期望耗尽：root 成功但后续 GET 无期望 → 各 collector 失败进入
-///   failed_resources，collect_all 返回 Ok 且 redfish_up=0（隔离语义）。
-/// - 根级失败：root GET 期望不匹配（UnexpectedGet）→ collect_all 返回 Err
+///   failed_resources，快/慢组合并后 up=0（隔离语义）。
+/// - 根级失败：root GET 期望不匹配（UnexpectedGet）→ ServiceRoot::new 返回 Err
 ///   （仅 ServiceRoot 层错误会传播，collector 层错误被隔离）。
 #[tokio::test]
 async fn bmc_failure_isolation() {
-    // 健康 BMC：root 仅含 Chassis 链接，5 个 chassis 枚举 collector
-    // 各自完成一轮集合+成员 GET，其余 collector 返回 Ok(空)。
+    // 健康 BMC：root 仅含 Chassis 链接，快组 sensors/power/chassis_health 与
+    // 慢组 network/assembly 共 5 个 chassis 枚举 collector 各自完成一轮
+    // 集合+成员 GET，其余 collector 返回 Ok(空)。
     let ok = Arc::new(Mock::default());
     expect_service_root(&ok, &["Chassis"]);
     for _ in 0..5 {
         expect_chassis_round(&ok, false);
     }
-    let report = collect_all(Arc::clone(&ok), "ok-bmc").await.unwrap();
+    let root = ServiceRoot::new(Arc::clone(&ok)).await.unwrap();
+    let fast = collect_fast(Arc::clone(&ok), &root, "ok-bmc")
+        .await
+        .unwrap();
+    let slow = collect_slow(Arc::clone(&ok), &root, "ok-bmc")
+        .await
+        .unwrap();
+    let merged = merge_reports(fast, Some(&slow));
+    let report = finalize_report(
+        "ok-bmc",
+        merged.metrics,
+        merged.failed_resources,
+        std::time::Instant::now(),
+    );
     assert!(report.failed_resources.is_empty());
     assert!(report.metrics.iter().any(|m| m.name == "redfish_up"
         && m.value == 1.0
@@ -557,17 +582,30 @@ async fn bmc_failure_isolation() {
     // 隔离进 failed_resources，redfish_up=0（scraper 层据此降级）。
     let exhausted = Arc::new(Mock::default());
     expect_service_root(&exhausted, &["Chassis"]);
-    let report = collect_all(exhausted, "exhausted-bmc").await.unwrap();
+    let root = ServiceRoot::new(Arc::clone(&exhausted)).await.unwrap();
+    let fast = collect_fast(Arc::clone(&exhausted), &root, "exhausted-bmc")
+        .await
+        .unwrap();
+    let slow = collect_slow(Arc::clone(&exhausted), &root, "exhausted-bmc")
+        .await
+        .unwrap();
+    let merged = merge_reports(fast, Some(&slow));
+    let report = finalize_report(
+        "exhausted-bmc",
+        merged.metrics,
+        merged.failed_resources,
+        std::time::Instant::now(),
+    );
     assert!(!report.failed_resources.is_empty());
     assert!(report.metrics.iter().any(|m| m.name == "redfish_up"
         && m.value == 0.0
         && labels_of(m).get("bmc") == Some(&"exhausted-bmc")));
 
     // 根级失败：root GET 命中不匹配的期望（UnexpectedGet），
-    // ServiceRoot::new 失败 → collect_all 返回 Err（错误传播）。
+    // ServiceRoot::new 失败 → 错误传播（collect_round 中返回 Err）。
     let bad = Arc::new(Mock::default());
     bad.expect(Expect::get("/redfish/v1/not-the-real-root", json!({})));
-    assert!(collect_all(bad, "bad-bmc").await.is_err());
+    assert!(ServiceRoot::new(bad).await.is_err());
 }
 
 /// 测试 3：session 认证流程（泛型化 establish_session + MockBmc 全流程）。

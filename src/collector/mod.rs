@@ -7,9 +7,10 @@ pub mod storage;
 pub mod systems;
 
 use crate::metrics::{HEALTH_STATUS, INFO, Metric, SCRAPE_DURATION, UP, health_state_labels};
-use nv_redfish::Bmc;
 use nv_redfish::schema::resource::{Health, Status};
+use nv_redfish::{Bmc, ServiceRoot};
 use std::sync::Arc;
+use std::time::Instant;
 
 pub(crate) fn health_wire(health: &Health) -> &'static str {
     match health {
@@ -63,70 +64,96 @@ pub(crate) fn push_info(out: &mut Vec<Metric>, bmc: &str, key: &str, value: &str
     );
 }
 
+#[derive(Clone)]
 pub struct ScrapeReport {
     pub metrics: Vec<Metric>,
     pub failed_resources: Vec<String>,
 }
 
-pub async fn collect_all<B: Bmc>(
+/// 快组：每轮采集。返回 report 不含 up/duration（finalize_report 统一添加）。
+pub async fn collect_fast<B: Bmc>(
     bmc: Arc<B>,
+    root: &ServiceRoot<B>,
     bmc_name: &str,
-) -> Result<ScrapeReport, nv_redfish::Error<B>> {
-    let started = std::time::Instant::now();
-    let root = nv_redfish::ServiceRoot::new(Arc::clone(&bmc)).await?;
+) -> Result<ScrapeReport, String> {
     let mut metrics = Vec::new();
     let mut failed_resources = Vec::new();
 
-    match sensors::collect_chassis_sensors(Arc::clone(&bmc), &root, bmc_name).await {
+    match sensors::collect_chassis_sensors(Arc::clone(&bmc), root, bmc_name).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match power::collect_power_metrics(Arc::clone(&bmc), &root, bmc_name).await {
+    match power::collect_power_metrics(Arc::clone(&bmc), root, bmc_name).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match processors::collect_processors(Arc::clone(&bmc), &root, bmc_name).await {
+    match processors::collect_processors(Arc::clone(&bmc), root, bmc_name).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match memory::collect_memory(Arc::clone(&bmc), &root, bmc_name).await {
+    match memory::collect_memory(Arc::clone(&bmc), root, bmc_name).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match storage::collect_storage(Arc::clone(&bmc), &root, bmc_name).await {
+    match systems::collect_systems(Arc::clone(&bmc), root, bmc_name).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match network::collect_network(Arc::clone(&bmc), &root, bmc_name).await {
+    match systems::collect_chassis_health(Arc::clone(&bmc), root, bmc_name).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match systems::collect_systems(Arc::clone(&bmc), &root, bmc_name).await {
-        Ok(m) => metrics.extend(m),
-        Err(resource) => failed_resources.push(resource),
-    }
-    match systems::collect_chassis_health(Arc::clone(&bmc), &root, bmc_name).await {
-        Ok(m) => metrics.extend(m),
-        Err(resource) => failed_resources.push(resource),
-    }
-    match systems::collect_managers(Arc::clone(&bmc), &root, bmc_name).await {
-        Ok(m) => metrics.extend(m),
-        Err(resource) => failed_resources.push(resource),
-    }
-    match systems::collect_assembly(Arc::clone(&bmc), &root, bmc_name).await {
-        Ok(m) => metrics.extend(m),
-        Err(resource) => failed_resources.push(resource),
-    }
-    match systems::collect_firmware(Arc::clone(&bmc), &root, bmc_name).await {
+    match systems::collect_managers(Arc::clone(&bmc), root, bmc_name).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
 
-    let up = if failed_resources.is_empty() {
-        1.0
-    } else {
-        0.0
-    };
+    Ok(ScrapeReport {
+        metrics,
+        failed_resources,
+    })
+}
+
+/// 慢组：按 slow_interval 分频采集。返回 report 不含 up/duration。
+pub async fn collect_slow<B: Bmc>(
+    bmc: Arc<B>,
+    root: &ServiceRoot<B>,
+    bmc_name: &str,
+) -> Result<ScrapeReport, String> {
+    let mut metrics = Vec::new();
+    let mut failed_resources = Vec::new();
+
+    match storage::collect_storage(Arc::clone(&bmc), root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
+    match network::collect_network(Arc::clone(&bmc), root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
+    match systems::collect_firmware(Arc::clone(&bmc), root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
+    match systems::collect_assembly(Arc::clone(&bmc), root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
+
+    Ok(ScrapeReport {
+        metrics,
+        failed_resources,
+    })
+}
+
+pub fn finalize_report(
+    bmc_name: &str,
+    metrics: Vec<Metric>,
+    failed: Vec<String>,
+    started: Instant,
+) -> ScrapeReport {
+    let mut metrics = metrics;
+    let up = if failed.is_empty() { 1.0 } else { 0.0 };
     metrics.push(
         Metric::gauge(UP.0, UP.1)
             .label("bmc", bmc_name.to_string())
@@ -137,8 +164,25 @@ pub async fn collect_all<B: Bmc>(
             .label("bmc", bmc_name.to_string())
             .build(started.elapsed().as_secs_f64()),
     );
-    Ok(ScrapeReport {
+    ScrapeReport {
         metrics,
-        failed_resources,
-    })
+        failed_resources: failed,
+    }
+}
+
+pub fn merge_reports(fast: ScrapeReport, slow: Option<&ScrapeReport>) -> ScrapeReport {
+    let mut metrics = fast.metrics;
+    let mut failed = fast.failed_resources;
+    if let Some(s) = slow {
+        metrics.extend(s.metrics.iter().cloned());
+        for r in &s.failed_resources {
+            if !failed.contains(r) {
+                failed.push(r.clone());
+            }
+        }
+    }
+    ScrapeReport {
+        metrics,
+        failed_resources: failed,
+    }
 }

@@ -76,3 +76,32 @@ fn secret_is_redacted_in_debug() {
     let s = redfish_exporter::config::SecretString::new("hunter2".into());
     assert!(!format!("{s:?}").contains("hunter2"));
 }
+
+#[test]
+fn parses_slow_interval() {
+    let p = write_tmp(
+        "slow",
+        r#"
+scrape_interval: "30s"
+slow_interval: "300s"
+bmcs:
+  - { name: a, host: https://h1, username: u, password: "p" }
+"#,
+    );
+    let cfg = load_config(&p).unwrap();
+    assert_eq!(cfg.slow_interval, Some(std::time::Duration::from_secs(300)));
+}
+
+#[test]
+fn slow_interval_defaults_to_none() {
+    let p = write_tmp(
+        "no_slow",
+        r#"
+scrape_interval: "30s"
+bmcs:
+  - { name: a, host: https://h1, username: u, password: "p" }
+"#,
+    );
+    let cfg = load_config(&p).unwrap();
+    assert_eq!(cfg.slow_interval, None);
+}
