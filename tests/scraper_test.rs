@@ -44,3 +44,28 @@ async fn build_registry_includes_error_metrics() {
     assert!(out.contains("redfish_scrape_error") && out.contains("sensors"));
     assert!(out.contains("bmc=\"bmc1\""));
 }
+
+#[tokio::test(start_paused = true)]
+async fn with_deadline_times_out() {
+    use redfish_exporter::scraper::with_deadline;
+    use std::time::Duration;
+    let never = async {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        42
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        with_deadline(Duration::from_secs(1), never),
+    )
+    .await;
+    assert!(result.is_ok()); // 内部 deadline 先触发
+    assert_eq!(result.unwrap(), None);
+}
+
+#[tokio::test]
+async fn with_deadline_completes_in_time() {
+    use redfish_exporter::scraper::with_deadline;
+    use std::time::Duration;
+    let ok = async { 7 };
+    assert_eq!(with_deadline(Duration::from_secs(1), ok).await, Some(7));
+}

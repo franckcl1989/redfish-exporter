@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,6 +10,11 @@ use crate::collector::{ScrapeReport, collect_all};
 use crate::config::{AuthMethod, Config};
 use crate::metrics::{Metric, UP};
 use crate::registry::{Snapshot, build_registry};
+
+/// 在 deadline 内运行 future；超时返回 None。
+pub async fn with_deadline<T>(timeout: Duration, fut: impl Future<Output = T>) -> Option<T> {
+    tokio::time::timeout(timeout, fut).await.ok()
+}
 
 pub struct Scraper {
     bmcs: Vec<BmcHandle>,
@@ -66,6 +72,7 @@ impl Scraper {
     async fn scrape_once(&self) {
         let started = Instant::now();
         let bmc_count = self.bmcs.len();
+        let timeout = self.timeout;
         let mut set = tokio::task::JoinSet::new();
         for handle in &self.bmcs {
             let name = handle.name.clone();
@@ -74,77 +81,84 @@ impl Scraper {
             let password = handle.password.clone();
             let auth = handle.auth;
             set.spawn(async move {
-                let result = match collect_all(Arc::clone(&bmc), &name).await {
-                    Ok(report) => Ok(report),
-                    Err(err) if auth == AuthMethod::Session && is_unauthorized(&err) => {
-                        info!(bmc = %name, "session rejected with 401, re-establishing session");
-                        match establish_session(&bmc, &username, password.expose()).await {
-                            Ok(token) => {
-                                bmc.set_credentials(nv_redfish::bmc_http::BmcCredentials::token(
-                                    token,
-                                ));
-                                info!(bmc = %name, "session re-established, retrying scrape");
-                                collect_all(Arc::clone(&bmc), &name).await
-                            }
-                            Err(e) => {
-                                warn!(
-                                    bmc = %name,
-                                    error = %e,
-                                    "session re-establishment failed"
-                                );
-                                Err(err)
+                let result = match with_deadline(timeout, async {
+                    match collect_all(Arc::clone(&bmc), &name).await {
+                        Ok(report) => Ok(report),
+                        Err(err) if auth == AuthMethod::Session && is_unauthorized(&err) => {
+                            info!(bmc = %name, "session rejected with 401, re-establishing session");
+                            match establish_session(&bmc, &username, password.expose()).await {
+                                Ok(token) => {
+                                    bmc.set_credentials(
+                                        nv_redfish::bmc_http::BmcCredentials::token(token),
+                                    );
+                                    info!(bmc = %name, "session re-established, retrying scrape");
+                                    collect_all(Arc::clone(&bmc), &name).await
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        bmc = %name,
+                                        error = %e,
+                                        "session re-establishment failed"
+                                    );
+                                    Err(err)
+                                }
                             }
                         }
+                        Err(err) => Err(err),
                     }
-                    Err(err) => Err(err),
+                })
+                .await
+                {
+                    Some(r) => r.map_err(|e| e.to_string()),
+                    None => Err("timeout".to_string()),
                 };
                 (name, result)
             });
         }
-        let collect = async {
-            while let Some(res) = set.join_next().await {
-                match res {
-                    Ok((name, Ok(report))) => match build_registry(&name, &report).await {
-                        Ok(reg) => {
-                            self.snapshot.update(&name, reg);
-                            info!(
-                                bmc = %name,
-                                failed = report.failed_resources.len(),
-                                "scrape complete"
-                            );
-                        }
+        while let Some(res) = set.join_next().await {
+            match res {
+                Ok((name, Ok(report))) => match build_registry(&name, &report).await {
+                    Ok(reg) => {
+                        self.snapshot.update(&name, reg);
+                        info!(
+                            bmc = %name,
+                            failed = report.failed_resources.len(),
+                            "scrape complete"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(bmc = %name, error = %e, "failed to build registry");
+                    }
+                },
+                Ok((name, Err(e))) => {
+                    let timed_out = e.contains("timeout");
+                    let report = ScrapeReport {
+                        metrics: vec![
+                            Metric::gauge(UP.0, UP.1)
+                                .label("bmc", name.clone())
+                                .build(0.0),
+                        ],
+                        failed_resources: if timed_out {
+                            vec!["timeout".to_string()]
+                        } else {
+                            vec!["bmc".to_string()]
+                        },
+                    };
+                    match build_registry(&name, &report).await {
+                        Ok(reg) => self.snapshot.update(&name, reg),
                         Err(e) => {
                             warn!(bmc = %name, error = %e, "failed to build registry");
                         }
-                    },
-                    Ok((name, Err(e))) => {
-                        let report = ScrapeReport {
-                            metrics: vec![
-                                Metric::gauge(UP.0, UP.1)
-                                    .label("bmc", name.clone())
-                                    .build(0.0),
-                            ],
-                            failed_resources: vec!["bmc".to_string()],
-                        };
-                        match build_registry(&name, &report).await {
-                            Ok(reg) => self.snapshot.update(&name, reg),
-                            Err(e) => {
-                                warn!(bmc = %name, error = %e, "failed to build registry");
-                            }
-                        }
+                    }
+                    if timed_out {
+                        warn!(bmc = %name, "scrape timed out after {:?}", self.timeout);
+                    } else {
                         warn!(bmc = %name, error = %e, "scrape failed");
                     }
-                    Err(e) => {
-                        warn!(error = %e, "scrape task panicked");
-                    }
                 }
-            }
-        };
-        match tokio::time::timeout(self.timeout, collect).await {
-            Ok(()) => {}
-            Err(_) => {
-                warn!("scrape round timed out after {:?}", self.timeout);
-                set.shutdown().await;
+                Err(e) => {
+                    warn!(error = %e, "scrape task panicked");
+                }
             }
         }
         info!(
