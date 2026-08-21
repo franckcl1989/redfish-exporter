@@ -13,7 +13,6 @@ pub const SCRAPE_DURATION: (&str, &str) = (
     "redfish_scrape_duration_seconds",
     "Duration of the last scrape of this BMC",
 );
-#[allow(dead_code)] // 0.1.0 未实现（scrape 级失败记录留给未来版本），docs 记录
 pub const SCRAPE_ERROR: (&str, &str) = (
     "redfish_scrape_error",
     "Set to 1 when the last scrape of a resource failed",
@@ -60,11 +59,6 @@ pub const POWER_SUPPLY_INPUT_VOLTAGE: (&str, &str) = (
 );
 pub const POWER_INPUT: (&str, &str) = ("redfish_power_input_watts", "Chassis power input in watts");
 pub const POWER_STATE: (&str, &str) = ("redfish_power_state", "Power state of a system, 1 = On");
-#[allow(dead_code)] // 0.1.0 未实现（处理器利用率由 PROCESSOR_BANDWIDTH 采集），docs 记录
-pub const PROCESSOR_UTILIZATION: (&str, &str) = (
-    "redfish_processor_utilization_percent",
-    "Processor utilization percentage",
-);
 pub const PROCESSOR_TEMPERATURE: (&str, &str) = (
     "redfish_processor_temperature_celsius",
     "Processor temperature in Celsius",
@@ -89,11 +83,6 @@ pub const VOLUME_CAPACITY: (&str, &str) =
     ("redfish_volume_capacity_bytes", "Volume capacity in bytes");
 pub const DRIVE_CAPACITY: (&str, &str) =
     ("redfish_drive_capacity_bytes", "Drive capacity in bytes");
-#[allow(dead_code)] // 0.1.0 未实现（驱动器利用率未采集），docs 记录
-pub const DRIVE_UTILIZATION: (&str, &str) = (
-    "redfish_drive_utilization_percent",
-    "Drive utilization percentage",
-);
 pub const LINK_STATUS: (&str, &str) = (
     "redfish_ethernet_interface_link_status",
     "Ethernet link status, 1 = up",

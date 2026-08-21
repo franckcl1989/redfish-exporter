@@ -20,6 +20,9 @@ Endpoints:
 |-------------|----------------------------------------------------------|
 | `/metrics`  | Prometheus text exposition of the current metric snapshot |
 | `/healthz`  | Liveness/readiness probe, returns `ok`                    |
+| `/info`     | Build information (version, Rust version, target OS/arch) as JSON |
+| `/discover` | Prometheus HTTP SD target list of all BMC hosts as JSON   |
+| `/reload`   | Reload and validate the config file from disk (`POST`; `400` on invalid config, old config kept; BMC add/remove or credential changes still need a restart) |
 
 CLI options: `-c/--config <path>` (default `config.yaml`), `-p/--port <port>` (overrides `listen_addr` port), `--log-level <level>` (default `info`; `RUST_LOG` takes precedence).
 
@@ -32,6 +35,7 @@ See [`config.example.yaml`](config.example.yaml). All durations use `humantime` 
 | `listen_addr`            | `0.0.0.0:9417`| HTTP listen address for `/metrics` and `/healthz`               |
 | `scrape_interval`        | `30s`         | Interval between scrape rounds                                   |
 | `scrape_timeout`         | `15s`         | Deadline for one scrape round; tasks are aborted when exceeded   |
+| `slow_interval`          | `null`        | Interval for slow-group collectors (storage, network, firmware, assembly, event logs, BIOS); `null` = collect every round |
 | `request_timeout`        | `10s`         | Per-request HTTP timeout, applied to every BMC request       |
 | `bmcs`                   | required      | Non-empty list of BMC entries                                    |
 | `bmcs[].name`            | required      | Unique name, used as the `bmc` metric label                      |
@@ -56,15 +60,19 @@ The full reference (every metric, its labels, help text and source Redfish resou
 | `redfish_up`                                  | Last scrape of the BMC succeeded     |
 | `redfish_scrape_duration_seconds`             | Duration of the last scrape          |
 | `redfish_scrape_error`                        | A resource failed during the scrape  |
+| `redfish_scrape_errors_total`, `redfish_build_info` | Exporter self-observation (cumulative scrape errors, build info) |
 | `redfish_health_status`                       | Health/state of any Redfish resource |
 | `redfish_info`                                | Static key-value inventory info      |
 | `redfish_sensor_reading` / `redfish_sensor_threshold_*` | Sensor readings and thresholds |
-| `redfish_power_consumption_watts`             | Chassis power consumption            |
+| `redfish_power_consumption_watts`, `redfish_power_consumption_min/max/avg_watts`, `redfish_power_consumption_interval_minutes` | Chassis power consumption and statistics |
+| `redfish_power_supply_*`                      | PSU details (efficiency, input watts, capacity, input voltage) |
 | `redfish_power_state`                         | System power state (1 = On)          |
 | `redfish_processor_temperature_celsius`, `redfish_processor_power_watts`, `redfish_processor_bandwidth_percent` | Processor metrics |
-| `redfish_memory_capacity_bytes`, `redfish_memory_bandwidth_percent` | Memory metrics      |
+| `redfish_memory_capacity_bytes`, `redfish_memory_bandwidth_percent`, `redfish_memory_correctable_errors`, `redfish_memory_uncorrectable_errors` | Memory metrics (capacity, bandwidth, ECC alarm trips) |
 | `redfish_drive_*`, `redfish_volume_capacity_bytes` | Storage metrics              |
 | `redfish_ethernet_interface_*`, `redfish_pcie_device_*` | Network metrics             |
+| `redfish_event_log_entry`                     | Event log entries (timestamp = creation time) |
+| `redfish_bios_attribute`, `redfish_bios_attribute_info`, `redfish_bios_pending_changes` | BIOS attributes and pending settings |
 
 ## Alerting
 

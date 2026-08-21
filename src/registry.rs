@@ -89,7 +89,7 @@ impl Snapshot {
 }
 
 /// 把一次采集的 ScrapeReport 构建成 prometheus Registry 并返回 Arc。
-/// 有失败资源时补 redfish_up=0（collect_all 已产出时值一致，合并无冲突），
+/// 有失败资源时补 redfish_up=0（finalize_report 已产出时值一致，合并无冲突），
 /// 每个失败资源追加 redfish_scrape_error{bmc,resource}=1。
 /// 另注入 redfish_build_info{version}=1 与 redfish_scrape_errors_total{bmc}=error_total
 /// （累计值来自快照层，registry 每轮重建后计数不丢失）。

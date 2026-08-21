@@ -17,9 +17,11 @@ Design overview of redfish-exporter 0.1.0 (Rust, nv-redfish 0.15.1).
         |          scraper.rs       |                 |           http.rs         |
         |  interval tick loop       |                 |  axum router             |
         |  JoinSet: one task per    |                 |  GET /metrics            |
-        |  BMC (collect_all)        |                 |  GET /healthz            |
-        |  round deadline =         |                 +-------------+-------------+
-        |  scrape_timeout           |                               |
+        |  BMC, per-BMC deadline    |                 |  GET /healthz            |
+        |  = scrape_timeout         |                 |  GET /info, /discover    |
+        |  fast group every round   |                 |  POST /reload            |
+        |  slow group per           |                 +-------------+-------------+
+        |  slow_interval (cached)   |                               |
         |  build_registry per BMC   |                               | snapshot.registries()
         +-------------+-------------+                               |
                       | snapshot.update(name, Arc<Registry>)        |
@@ -35,33 +37,40 @@ Per-BMC scrape pipeline (each collector in `src/collector/`):
 ```
 ServiceRoot
   ├─ sensors.rs   chassis sensor links + thresholds
-  ├─ power.rs     legacy Thermal/Power, power supplies, EnvironmentMetrics, Controls
+  ├─ power.rs     legacy Thermal/Power, power supplies (+ stats), EnvironmentMetrics, Controls
   ├─ processors.rs ProcessorMetrics (temp/power/bandwidth)
-  ├─ memory.rs    Memory capacity + MemoryMetrics
+  ├─ memory.rs    Memory capacity + MemoryMetrics (bandwidth, ECC alarm trips)
   ├─ storage.rs   Drive metrics + Volume capacity
   ├─ network.rs   EthernetInterface + PCIe devices + NetworkAdapter ports
+  ├─ logs.rs      LogService entries (paginated via nextLink)
+  ├─ bios.rs      BIOS attributes + pending-settings flag
   └─ systems.rs   System/Chassis/Manager health+info, Assembly, Firmware inventory
         └─ all push health (redfish_health_status) and info (redfish_info)
 ```
+
+Fast group (every round): sensors, power, processors, memory, system/chassis/manager health. Slow group (at most once per `slow_interval`, default every round): storage, network, firmware, assembly, event logs, BIOS. Slow-group results are cached across rounds and last-good output survives a failed slow collection.
 
 ## Component responsibilities
 
 | Module | Responsibility |
 |--------|----------------|
 | `config.rs` | YAML parsing, duration deserialization (`humantime`), validation, `SecretString` redaction |
-| `bmc.rs` | Per-BMC reqwest client construction (timeout, TLS, CA bundle, `insecure_skip_verify`), `HttpBmc` handle creation, generic session establishment |
-| `collector/*.rs` | Fetch Redfish resources through nv-redfish and convert them into `Metric` values; one module per resource family |
-| `collector/mod.rs` | `collect_all`: orchestrates every collector against one BMC, aggregates metrics and `failed_resources`; shared `push_health` / `push_info` helpers |
-| `scraper.rs` | Periodic loop; spawns one task per BMC (`JoinSet`); enforces the round deadline; builds per-BMC registries and publishes them to the snapshot |
-| `registry.rs` | `Snapshot`: `RwLock<HashMap<String, Arc<Registry>>>` keyed by BMC name with per-BMC atomic replacement; adds `redfish_scrape_error` series and `redfish_up=0` for failed resources |
-| `http.rs` | axum router serving `/metrics` (per-BMC snapshots concatenated in BMC-name order) and `/healthz`; graceful shutdown |
+| `bmc.rs` | Per-BMC reqwest client construction (timeout, TLS, CA bundle, `insecure_skip_verify`), `HttpBmc` handle creation, generic session establishment, 401/404 status matching |
+| `collector/*.rs` | Fetch Redfish resources through nv-redfish and convert them into `Metric` values; one module per resource family (including `logs.rs` event-log entries and `bios.rs` BIOS attributes) |
+| `collector/mod.rs` | `collect_fast` / `collect_slow`: orchestrate the fast (every round) and slow (per `slow_interval`) collectors against one BMC, aggregate metrics and `failed_resources`; `finalize_report` appends `redfish_up` / `redfish_scrape_duration_seconds`; `merge_reports` merges group results; shared `push_health` / `push_info` helpers |
+| `pagination.rs` | Raw-fetch nextLink walker (`fetch_all_pages`), supporting both `@odata.nextLink` and `Members@odata.nextLink`; used by the event-log collector |
+| `scraper.rs` | Periodic loop; spawns one task per BMC (`JoinSet`) with a **per-BMC deadline** (`with_deadline`); fast group every round, slow group per `slow_interval` with last-good caching; 401 → re-establish session and retry the round once; deletes established sessions on shutdown; builds per-BMC registries and publishes them to the snapshot |
+| `registry.rs` | `Snapshot`: `RwLock<HashMap<String, Arc<Registry>>>` keyed by BMC name with per-BMC atomic replacement; adds `redfish_scrape_error` series, `redfish_up=0` for failed rounds, `redfish_build_info{version}` and the cumulative `redfish_scrape_errors_total{bmc}` counter |
+| `http.rs` | axum router serving `/metrics` (per-BMC snapshots concatenated in BMC-name order), `/healthz`, `/info`, `/discover`, `/reload`; `AppState` holds the snapshot, the runtime config (`/reload` hot-replaces the config object) and the config path; graceful shutdown |
 | `main.rs` | CLI parsing, wiring, signal handling, exit codes |
 
 ## Data flow and error model
 
 - **BMC-level isolation**: each round, every BMC is scraped in its own `JoinSet` task producing its own `Result`. A failing BMC (auth error, unreachable host, …) yields `redfish_up{bmc}=0` and does not affect other BMCs. A BMC that never produced a snapshot is simply absent from `/metrics` (with `x-redfish-exporter: no-data-yet` header when no BMC has ever produced one). Multi-BMC: each BMC's registry is published independently under its own name and `/metrics` concatenates all of them sorted by BMC name, so every BMC keeps being served as long as it completed at least one round.
 - **Resource-level isolation**: a failing collector does not abort the whole BMC. It records the failing resource in `failed_resources`, which produces `redfish_scrape_error{bmc,resource}=1`, forces `redfish_up{bmc}=0` (applied in `registry.rs`), while the metrics of all other resources are still published. Sub-resource fetches inside a collector (sensor links, drives, volumes, ports) follow the same rule: a failed fetch skips that sub-resource only, and the collector returns `Err` only when *all* of a sub-resource group failed (e.g. all sensor links of a chassis).
-- **Round deadline**: the whole round is wrapped in `tokio::time::timeout(scrape_timeout)`; on expiry the remaining tasks are aborted (`JoinSet::shutdown`) and the round is logged as timed out. BMCs that already completed keep their snapshots — there is no rollback; aborted BMCs retain their previous round's snapshot until a later round succeeds.
+- **Per-BMC deadline**: each BMC task runs under `with_deadline(scrape_timeout)` (Task 6A). On expiry the task yields a `timeout` failure that publishes `redfish_up=0` plus `redfish_scrape_error{resource="timeout"}=1` (and increments `redfish_scrape_errors_total`), so a slow BMC neither delays other BMCs nor silently drops its series (fixes AUDIT-1/3). There is no rollback: BMCs that completed keep their snapshots, and an aborted BMC publishes its failure snapshot until a later round succeeds.
+- **Slow group**: collectors that dominate round time on real hardware (storage, network, firmware, assembly, event logs, BIOS — see audit §5) run at most once per `slow_interval` (default: every round). Results are cached in the scraper (`slow_state`) and last-good output survives a failed slow collection.
+- **404 fast-skip**: if the ServiceRoot fetch returns 404, the round is skipped and an `up=0` snapshot without failed-resource accounting is published (`is_not_found` in `collector/error.rs`); other 404s still count as failed resources.
 - **Snapshot consistency**: the registry per BMC is built fresh each round and swapped in atomically, so `/metrics` always returns one consistent snapshot per BMC and never a partially-written one.
 
 ## Known design trade-off (Ruling 7c)
@@ -72,11 +81,11 @@ Each collector independently enumerates the `Chassis`/`Systems` collections, so 
 
 ```
 main
-  └─ start: config -> Scraper::new (clients + optional session establishment)
+  └─ start: config -> Scraper::new (clients + optional session establishment; failure falls back to basic)
   └─ watch channel (stop: bool)
   └─ serve + scraper.run concurrently
   └─ signal (SIGINT/SIGTERM/Ctrl+C) -> stop_tx.send(true)
-       ├─ scraper loop: select! on stop.changed() -> break (before next tick)
+       ├─ scraper loop: select! on stop.changed() -> delete established sessions -> break (before next tick)
        └─ http serve: with_graceful_shutdown(stop.changed()) -> drains in-flight requests
   └─ join both -> "shutdown complete" -> exit code 0
 ```
@@ -86,7 +95,7 @@ If the scraper task panics/aborts unexpectedly, main logs the JoinError and exit
 ## Authentication flow
 
 - `basic`: `BmcCredentials::username_password` is baked into the `HttpBmc`; every request carries HTTP Basic credentials.
-- `session`: at startup, `bmc.rs::establish_session` (generic over `B: nv_redfish::Bmc`, so the flow is testable with the mock BMC) walks `ServiceRoot -> SessionService -> Sessions`, POSTs a `SessionCreate`, extracts `X-Auth-Token`, and the caller applies it via `HttpBmc::set_credentials(BmcCredentials::token(...))`. All subsequent requests use the token. On a `401` during a round (`bmc.rs::is_unauthorized` matches `BmcError::InvalidResponse { status: 401, .. }`), the scraper re-establishes the session once (same flow as startup) and retries `collect_all` once for that BMC; if re-establishment or the retry fails, the round is treated as failed (`redfish_up=0`). Credentials are never logged — re-auth log lines carry only the BMC name and error. Basic-auth BMCs never re-login (Basic has no session to refresh).
+- `session`: at startup, `bmc.rs::establish_session` (generic over `B: nv_redfish::Bmc`, so the flow is testable with the mock BMC) walks `ServiceRoot -> SessionService -> Sessions`, POSTs a `SessionCreate`, extracts `X-Auth-Token`, and the caller applies it via `HttpBmc::set_credentials(BmcCredentials::token(...))`. All subsequent requests use the token. If establishment fails at startup the BMC **falls back to basic auth** (warn, no abort — fixes AUDIT-2) and retries session establishment on the first round. On a `401` during a round (`bmc.rs::is_unauthorized` matches `BmcError::InvalidResponse { status: 401, .. }`), the scraper re-establishes the session once (same flow as startup) and retries the round once; if re-establishment or the retry fails, the round is treated as failed (`redfish_up=0`). Established sessions are **deleted on shutdown** (`Session::delete`, scraper stop branch, Task 13) so no server-side sessions leak; the old session of a 401 re-login is already expired and not deleted. Credentials are never logged — re-auth log lines carry only the BMC name and error. Basic-auth BMCs never re-login (Basic has no session to refresh).
 
 ## Config validation rules
 
@@ -98,7 +107,8 @@ From `config.rs` (`load_config`), applied in order:
 4. At least one BMC is required.
 5. `listen_addr` must parse as a `SocketAddr`.
 6. `scrape_interval`, `scrape_timeout`, `request_timeout` must be non-zero (durations via `humantime`, e.g. `30s`).
-7. Defaults: `listen_addr=0.0.0.0:9417`, `scrape_interval=30s`, `scrape_timeout=15s`, `request_timeout=10s`, `auth=basic`, `insecure_skip_verify=false`, `ca_cert_file=null`.
+7. `slow_interval`, if set, must be non-zero.
+8. Defaults: `listen_addr=0.0.0.0:9417`, `scrape_interval=30s`, `scrape_timeout=15s`, `request_timeout=10s`, `slow_interval=null` (no frequency splitting), `auth=basic`, `insecure_skip_verify=false`, `ca_cert_file=null`.
 
 Client-level HTTP: request timeout from `request_timeout` config (default 10 s), 5 s connect timeout, user agent `nv-redfish/v1`; `ca_cert_file` adds a root certificate, `insecure_skip_verify` disables certificate verification entirely.
 
@@ -109,6 +119,7 @@ Client-level HTTP: request timeout from `request_timeout` config (default 10 s),
 - Health/state of every resource is normalized to a single `redfish_health_status` gauge with `health`/`state` labels, so alerts can be written once for all resource types.
 - Static inventory is flattened into `redfish_info{key,value}` (e.g. `manufacturer`, `model`, `serial_number`, `firmware_version`) instead of a metric per field.
 - Status values: `health` is normalized to `OK`/`Warning`/`Critical`/`UnsupportedValue`/`unknown`, `state` to its debug name or `unknown`.
+- Counter-style names ending in `_total` (`redfish_drive_io_*_errors_total`, `redfish_scrape_errors_total`) follow Prometheus counter naming but are registered as Gauges carrying the last scraped (or cumulative) value, consistent with the snapshot-cache design; `redfish_event_log_entry` carries a Unix timestamp as its value.
 
 ## Release and static linking
 

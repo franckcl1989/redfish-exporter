@@ -11,7 +11,10 @@ Values are pushed on every scrape; labels whose source field is absent on the BM
 | `bmc`          | Config name of the BMC (see `bmcs[].name` in the config file)  |
 | `system`       | ComputerSystem resource id                                      |
 | `chassis`      | Chassis resource id                                             |
-| `id`           | Resource id of the reported entity (processor, memory module, drive, volume, ethernet interface, PCIe device) |
+| `manager`      | Manager resource id                                             |
+| `service`      | LogService resource id                                          |
+| `attribute`    | BIOS attribute name                                             |
+| `id`           | Resource id of the reported entity (processor, memory module, drive, volume, ethernet interface, PCIe device, log entry, power supply) |
 | `storage`      | Storage (storage controller) resource id                        |
 | `resource_type`| Redfish resource type reported by `redfish_health_status`      |
 | `health`       | `OK` / `Warning` / `Critical` / `UnsupportedValue` / `unknown` |
@@ -23,9 +26,11 @@ Values are pushed on every scrape; labels whose source field is absent on the BM
 
 | Metric                             | Labels                       | Help text from code                                      | Source |
 |------------------------------------|------------------------------|----------------------------------------------------------|--------|
-| `redfish_up`                       | `bmc`                        | Whether the last scrape of this BMC succeeded            | per-BMC scrape result (`collect_all`); forced to 0 on total failure |
-| `redfish_scrape_duration_seconds`  | `bmc`                        | Duration of the last scrape of this BMC                  | `collect_all` wall time |
-| `redfish_scrape_error`             | `bmc`, `resource`            | Set to 1 when the last scrape of a resource failed       | one series per failed resource (`registry.rs`) |
+| `redfish_up`                       | `bmc`                        | Whether the last scrape of this BMC succeeded            | per-BMC scrape result (`finalize_report`); forced to 0 on resource failure, round failure or timeout |
+| `redfish_scrape_duration_seconds`  | `bmc`                        | Duration of the last scrape of this BMC                  | round wall time (`finalize_report`) |
+| `redfish_scrape_error`             | `bmc`, `resource`            | Set to 1 when the last scrape of a resource failed       | one series per failed resource (`registry.rs`); `resource="timeout"` for deadline expiry, `resource="bmc"` for round failure |
+| `redfish_scrape_errors_total`      | `bmc`                        | Total number of failed resources across all scrape rounds | cumulative counter in `Snapshot` (`registry.rs`), incremented per failed resource and once per failed/timed-out round |
+| `redfish_build_info`               | `version`                    | Build information                                        | exporter crate version (`build_registry`, `registry.rs`), always `1.0` |
 | `redfish_health_status`            | `bmc`, `resource_type`, `id`, `health`, `state` | Health and state of a resource      | `Status.Health` + `Status.State` of any collected resource; always `1.0` |
 | `redfish_info`                     | `bmc`, `key`, `value`        | Static key-value information about a BMC                 | inventory fields, always `1.0` |
 
@@ -45,9 +50,19 @@ Values are pushed on every scrape; labels whose source field is absent on the BM
 
 ### Power
 
-| Metric                            | Labels          | Help text from code                        | Source |
-|-----------------------------------|-----------------|--------------------------------------------|--------|
-| `redfish_power_consumption_watts` | `bmc`, `chassis`| Total chassis power consumption in watts   | legacy `PowerControl.PowerConsumedWatts` (first control) |
+| Metric                                      | Labels           | Help text from code                                  | Source |
+|---------------------------------------------|------------------|------------------------------------------------------|--------|
+| `redfish_power_consumption_watts`           | `bmc`, `chassis` | Total chassis power consumption in watts             | legacy `PowerControl.PowerConsumedWatts` (first control) |
+| `redfish_power_consumption_min_watts`       | `bmc`, `chassis` | Minimum chassis power consumption in watts over the measurement window | `PowerControl.PowerMetrics.MinConsumedWatts` |
+| `redfish_power_consumption_max_watts`       | `bmc`, `chassis` | Maximum chassis power consumption in watts over the measurement window | `PowerControl.PowerMetrics.MaxConsumedWatts` |
+| `redfish_power_consumption_avg_watts`       | `bmc`, `chassis` | Average chassis power consumption in watts over the measurement window | `PowerControl.PowerMetrics.AverageConsumedWatts` |
+| `redfish_power_consumption_interval_minutes`| `bmc`, `chassis` | Power consumption measurement window in minutes      | `PowerControl.PowerMetrics.IntervalInMin` |
+| `redfish_power_supply_efficiency_percent`   | `bmc`, `chassis`, `id` | Power supply efficiency in percent            | `PowerSupply.EfficiencyPercent` |
+| `redfish_power_supply_input_watts`          | `bmc`, `chassis`, `id` | Power supply input power in watts             | `PowerSupply.PowerInputWatts` |
+| `redfish_power_supply_capacity_watts`       | `bmc`, `chassis`, `id` | Power supply rated capacity in watts          | `PowerSupply.PowerCapacityWatts` |
+| `redfish_power_supply_input_voltage`        | `bmc`, `chassis`, `id` | Power supply line input voltage in volts      | `PowerSupply.LineInputVoltage` |
+
+Note: PSU metrics are read from the legacy Power document (embedded `PowerSupplies`, never fetched as independent resources — Dell exposes fragment URIs that would re-download the whole Power document, see AUDIT-9). PSUs additionally contribute `redfish_sensor_reading` series (see Sensors).
 
 ### Processors
 
@@ -63,6 +78,8 @@ Values are pushed on every scrape; labels whose source field is absent on the BM
 |-----------------------------------|-----------------------|----------------------------------------------|--------|
 | `redfish_memory_capacity_bytes`   | `bmc`, `system`, `id` | Memory capacity in bytes                     | `Memory.capacity_mib` × 1,048,576 |
 | `redfish_memory_bandwidth_percent`| `bmc`, `system`, `id` | Memory bandwidth utilization percentage      | `MemoryMetrics.bandwidth_percent` |
+| `redfish_memory_correctable_errors`   | `bmc`, `system`, `id` | Memory correctable ECC alarm trip, 1 = tripped | `MemoryMetrics.HealthData.AlarmTrips.CorrectableECCError` |
+| `redfish_memory_uncorrectable_errors` | `bmc`, `system`, `id` | Memory uncorrectable ECC alarm trip, 1 = tripped | `MemoryMetrics.HealthData.AlarmTrips.UncorrectableECCError` |
 
 ### Storage
 
@@ -77,7 +94,7 @@ Values are pushed on every scrape; labels whose source field is absent on the BM
 | `redfish_drive_io_write_uncorrectable_errors_total`| `bmc`, `system`, `storage`, `id`| Lifetime number of uncorrectable write errors reported by the drive   | `DriveMetrics.uncorrectable_io_write_error_count` |
 | `redfish_volume_capacity_bytes`              | `bmc`, `system`, `storage`, `id`| Volume capacity in bytes                                                      | `Volume.capacity_bytes` |
 
-Note: the `redfish_drive_io_*_errors_total` metrics follow counter naming conventions (`_total` suffix) but are registered as **Gauge** carrying the last scraped lifetime value, consistent with the snapshot-cache design.
+Note: the `redfish_drive_io_*_errors_total` and `redfish_scrape_errors_total` metrics follow counter naming conventions (`_total` suffix) but are registered as **Gauge** carrying the last scraped (or cumulative) value, consistent with the snapshot-cache design.
 
 ### Network
 
@@ -94,17 +111,35 @@ Note: the `redfish_drive_io_*_errors_total` metrics follow counter naming conven
 |-------------------|-----------------|------------------------------------|--------|
 | `redfish_power_state` | `bmc`, `system` | Power state of a system, 1 = On  | `System.power_state`; series emitted only when the state is `On` |
 
+### Event log
+
+| Metric                    | Labels                                       | Help text from code                                            | Source |
+|---------------------------|----------------------------------------------|----------------------------------------------------------------|--------|
+| `redfish_event_log_entry` | `bmc`, `manager`, `service`, `severity`, `message`, `id` | Event log entry, value is the entry creation time as a Unix timestamp | `LogService.Entries` members (`logs.rs`), fetched with the pagination walker (`Members@odata.nextLink`); slow group |
+
+`severity` is the `LogEntry.Severity` debug name (`OK` / `Warning` / `Critical`, empty when absent, e.g. Inspur AuditLog); `message` is the `LogEntry.Message` text (empty when absent). Entries without a parseable `Created` timestamp are skipped. Series are stale-prone (log entries are not deleted by the exporter), so alerts should use `changes()`-style PromQL rather than `absent()`.
+
+### BIOS
+
+| Metric                            | Labels                     | Help text from code                   | Source |
+|-----------------------------------|----------------------------|---------------------------------------|--------|
+| `redfish_bios_attribute`          | `bmc`, `system`, `attribute` | BIOS attribute value               | `Bios.Attributes` numeric / boolean / `Enabled` / `Disabled` values (`bios.rs`); slow group |
+| `redfish_bios_attribute_info`     | `bmc`, `system`, `attribute`, `value` | BIOS string attribute       | `Bios.Attributes` string values, always `1.0`; slow group |
+| `redfish_bios_pending_changes`    | `bmc`, `system`            | BIOS settings pending reboot           | presence of `@Redfish.Settings` on the Bios resource (`bios.rs`), 1 = pending; slow group |
+
+Null attribute values (including password fields such as Dell `SysPassword`/Inspur `AdministratorPassword`) are skipped and never exported; a system whose Bios payload fails to parse is skipped entirely (audit ⚠️ for the Inspur 166 KB payload, see 待复验).
+
 ## B. Recorded but not implemented
 
 The following areas were evaluated during 0.1.0 scoping and are deliberately **not collected**. Reasons and directions for future versions:
 
 | Item | Reason | Direction |
 |------|--------|-----------|
-| LogService, EventService, TaskService, AccountService, SessionService metrics | Out of scope for 0.1.0 (read-only sensor/compliance focus); session usage is internal | dedicated collectors; EventService subscription-based eventing is a larger design |
-| BIOS, BootOptions, SecureBoot, HostInterfaces, ManagerNetworkProtocol | Out of scope; volatile/firmware-config rather than monitoring data | `redfish_info`-style versioning collectors |
+| EventService, TaskService, AccountService, SessionService metrics | Out of scope for 0.1.0 (read-only sensor/compliance focus); session usage is internal | dedicated collectors; EventService subscription-based eventing is a larger design |
+| BootOptions, SecureBoot, HostInterfaces, ManagerNetworkProtocol | Out of scope; volatile/firmware-config rather than monitoring data | `redfish_info`-style versioning collectors |
 | All OEM extension resources | Vendor-specific schemas, high maintenance cost | opt-in collectors behind config flags |
 | `redfish_power_input_watts` | Constant defined in `src/metrics.rs` but no collector pushes it (chassis input power is not reported by the legacy Power schema in nv-redfish) | emit when the BMC distinguishes input vs consumed power |
-| `redfish_processor_utilization_percent` | `ProcessorSummary` has no utilization field (constant reserved in `metrics.rs`) | collect per-core utilization / `OperatingConfig` once exposed by nv-redfish |
-| `redfish_drive_utilization_percent` | `DriveMetrics` has no utilization field (constant reserved in `metrics.rs`) | SMART-based estimate or nv-redfish schema extension |
+| `redfish_processor_utilization_percent` | `ProcessorSummary` has no utilization field | collect per-core utilization / `OperatingConfig` once exposed by nv-redfish |
+| `redfish_drive_utilization_percent` | `DriveMetrics` has no utilization field | SMART-based estimate or nv-redfish schema extension |
 | PCIe link rate (GT/s) | `PcieDevice` has no link-speed field | nv-redfish schema extension (needs `PcieDevice.PcieDeviceProperties` extension data) |
 | StorageController health | Storage references are `ReferenceLeaf` (no embedded data); drives/volumes are collected instead | fetch each controller resource individually |

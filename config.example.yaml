@@ -1,7 +1,7 @@
 # redfish-exporter configuration example
 listen_addr: "0.0.0.0:9417"   # HTTP listen address (default 0.0.0.0:9417)
 scrape_interval: "30s"         # periodic scrape interval (default 30s)
-# slow_interval: "300s"        # optional: slow group (storage/network/firmware/assembly) interval (default: every round)
+# slow_interval: "300s"        # optional: slow group (storage/network/firmware/assembly/event log/BIOS) interval (default: every round)
 scrape_timeout: "15s"          # per-round deadline (default 15s)
 request_timeout: "10s"         # per-request timeout (default 10s)
 bmcs:
