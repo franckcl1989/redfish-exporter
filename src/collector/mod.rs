@@ -1,3 +1,4 @@
+pub mod bios;
 pub mod logs;
 pub mod memory;
 pub mod network;
@@ -141,6 +142,10 @@ pub async fn collect_slow<B: Bmc>(
         Err(resource) => failed_resources.push(resource),
     }
     match logs::collect_event_logs(Arc::clone(&bmc), root, bmc_name).await {
+        Ok(m) => metrics.extend(m),
+        Err(resource) => failed_resources.push(resource),
+    }
+    match bios::collect_bios(Arc::clone(&bmc), root, bmc_name).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }

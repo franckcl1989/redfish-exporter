@@ -176,6 +176,9 @@ fn expect_system(bmc: &Mock, links: &[&str]) {
                 payload["EthernetInterfaces"] =
                     json!({ "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces" });
             }
+            "Bios" => {
+                payload["Bios"] = json!({ "@odata.id": "/redfish/v1/Systems/1/Bios" });
+            }
             _ => unreachable!("unexpected system link {link}"),
         }
     }
@@ -314,6 +317,26 @@ fn expect_storage_payloads(bmc: &Mock) {
     ));
 }
 
+fn expect_bios_payloads(bmc: &Mock) {
+    bmc.expect(Expect::get(
+        "/redfish/v1/Systems/1/Bios",
+        json!({
+            "@odata.id": "/redfish/v1/Systems/1/Bios",
+            "Id": "Bios", "Name": "BIOS",
+            "Attributes": {
+                "BootMode": "Uefi",
+                "MemTest": "Disabled",
+                "LegacyBoot": true,
+                "MaxCores": 16,
+            },
+            "@Redfish.Settings": {
+                "@odata.id": "/redfish/v1/Systems/1/Bios/Settings",
+                "SettingsObject": { "@odata.id": "/redfish/v1/Systems/1/Bios/Settings" },
+            },
+        }),
+    ));
+}
+
 fn expect_ethernet_payloads(bmc: &Mock) {
     bmc.expect(Expect::get(
         "/redfish/v1/Systems/1/EthernetInterfaces",
@@ -412,7 +435,7 @@ fn expect_firmware_payloads(bmc: &Mock) {
 ///
 /// mock expectation 顺序必须与实际请求顺序一致：快组
 /// sensors → power → processors → memory → systems → chassis_health → managers，
-/// 慢组 storage → network → firmware → assembly。
+/// 慢组 storage → network → firmware → assembly → bios。
 /// managers 因 root 无 Managers 链接而跳过（Ok(None)，无网络请求）。
 #[tokio::test]
 async fn full_scrape_cycle_with_mock_bmc() {
@@ -464,6 +487,11 @@ async fn full_scrape_cycle_with_mock_bmc() {
     // 慢组：assembly（chassis 枚举）
     expect_chassis_round(&bmc, true);
     expect_assembly_payloads(&bmc);
+
+    // 慢组：bios（systems 枚举）
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, &["Bios"]);
+    expect_bios_payloads(&bmc);
 
     let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
     let fast = collect_fast(Arc::clone(&bmc), &root, "bmc1").await.unwrap();
@@ -532,6 +560,16 @@ async fn full_scrape_cycle_with_mock_bmc() {
         metrics
             .iter()
             .any(|m| m.name == "redfish_ethernet_interface_link_status")
+    );
+    assert!(
+        metrics
+            .iter()
+            .any(|m| m.name == "redfish_bios_pending_changes" && m.value == 1.0)
+    );
+    assert!(
+        metrics
+            .iter()
+            .any(|m| m.name == "redfish_bios_attribute" && m.value == 16.0)
     );
 
     // 端到端：ScrapeReport → prometheus Registry → 文本编码
