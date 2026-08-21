@@ -165,6 +165,12 @@ impl Scraper {
                         Ok(report) => Ok(report),
                         Err(err) if auth == AuthMethod::Session && is_unauthorized(&err) => {
                             info!(bmc = %name, "session rejected with 401, re-establishing session");
+                            // 重登前切回 basic 凭据：establish_session 的 ServiceRoot/SessionService
+                            // 请求若仍带已失效的 X-Auth-Token 会继续 401，导致无法恢复。
+                            bmc.set_credentials(nv_redfish::bmc_http::BmcCredentials::username_password(
+                                username.clone(),
+                                Some(password.expose().to_string()),
+                            ));
                             match establish_session(&bmc, &username, password.expose()).await {
                                 Ok(est) => {
                                     bmc.set_credentials(
