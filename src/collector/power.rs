@@ -187,22 +187,6 @@ async fn legacy_power_supplies<B: Bmc>(
         let Ok(supply) = nav.get(bmc).await else {
             continue;
         };
-        let Some(reading) = unbox_reading(supply.power_output_watts) else {
-            continue;
-        };
-        let (health, state) = status_labels(supply.status.as_ref());
-        let labels = ReadingLabels {
-            name: supply
-                .name
-                .clone()
-                .flatten()
-                .unwrap_or_else(|| supply.base.member_id.clone()),
-            units: "W".to_string(),
-            sensor_type: "Power".to_string(),
-            health,
-            state,
-        };
-        push_sensor_reading(out, bmc_name, chassis_id, &labels, reading);
         let id = supply.base.member_id.clone();
         push_psu_metric(
             out,
@@ -236,6 +220,22 @@ async fn legacy_power_supplies<B: Bmc>(
             POWER_SUPPLY_INPUT_VOLTAGE,
             unbox_reading(supply.line_input_voltage),
         );
+        let Some(reading) = unbox_reading(supply.power_output_watts) else {
+            continue;
+        };
+        let (health, state) = status_labels(supply.status.as_ref());
+        let labels = ReadingLabels {
+            name: supply
+                .name
+                .clone()
+                .flatten()
+                .unwrap_or_else(|| supply.base.member_id.clone()),
+            units: "W".to_string(),
+            sensor_type: "Power".to_string(),
+            health,
+            state,
+        };
+        push_sensor_reading(out, bmc_name, chassis_id, &labels, reading);
     }
     Ok(())
 }
