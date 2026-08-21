@@ -119,3 +119,34 @@ bmcs:
     );
     assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
 }
+
+#[test]
+fn rejects_host_with_userinfo() {
+    let p = write_tmp(
+        "userinfo",
+        r#"
+bmcs:
+  - { name: a, host: https://user:secret@h1, username: u, password: "p" }
+"#,
+    );
+    assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
+}
+
+#[test]
+fn rejects_control_chars_in_bmc_name() {
+    let p = write_tmp(
+        "ctrl_name",
+        "bmcs:\n  - { name: \"a\\nb\", host: https://h1, username: u, password: \"p\" }\n",
+    );
+    assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
+}
+
+#[test]
+fn default_listen_addr_is_localhost() {
+    let p = write_tmp(
+        "default_bind",
+        "bmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
+    );
+    let cfg = load_config(&p).unwrap();
+    assert_eq!(cfg.listen_addr, "127.0.0.1:9417".parse().unwrap());
+}

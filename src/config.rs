@@ -106,7 +106,7 @@ struct RawConfig {
 }
 
 fn default_listen_addr() -> String {
-    "0.0.0.0:9417".into()
+    "127.0.0.1:9417".into()
 }
 fn default_interval() -> Duration {
     Duration::from_secs(30)
@@ -149,6 +149,12 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
         if b.name.trim().is_empty() {
             return Err(ConfigError::Invalid("bmc name must not be empty".into()));
         }
+        if b.name.chars().any(|c| c.is_control()) {
+            return Err(ConfigError::Invalid(format!(
+                "bmc '{}': name must not contain control characters",
+                b.name
+            )));
+        }
         if !names.insert(b.name.clone()) {
             return Err(ConfigError::Invalid(format!(
                 "duplicate bmc name '{}'",
@@ -160,6 +166,12 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
         if !matches!(host.scheme(), "http" | "https") {
             return Err(ConfigError::Invalid(format!(
                 "host '{}': scheme must be http or https",
+                b.host
+            )));
+        }
+        if !host.username().is_empty() || host.password().is_some() {
+            return Err(ConfigError::Invalid(format!(
+                "host '{}': credentials in URL are not allowed; use the username/password fields",
                 b.host
             )));
         }
