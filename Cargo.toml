@@ -12,6 +12,7 @@ nv-redfish = { version = "0.15", default-features = false, features = [
     "sensors", "thermal", "power", "power-supplies", "controls", "environment-metrics",
     "processors", "memory", "storages", "ethernet-interfaces",
     "network-adapters", "ports", "pcie-devices", "update-service", "session-service",
+    "log-services",
 ] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "net"] }
