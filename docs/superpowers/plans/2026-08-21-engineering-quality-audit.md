@@ -669,6 +669,160 @@ git commit -m "docs: gap analysis vs three reference exporters"
 
 # 阶段二：必做实现（TDD）
 
+### Task 6A: per-BMC 轮超时隔离（修复 AUDIT-1）
+
+**背景（审计证据）**：AUDIT-1 —— 浪潮一轮需 67–89s，`scrape_timeout=60s` 整轮截止（scraper.rs:143 `tokio::time::timeout(self.timeout, collect)`）把整轮 abort；被 abort 的 BMC 任务不产生任何 registry 更新 → `/metrics` 上该 BMC **彻底消失**（无 `redfish_up=0`，Prometheus 静默丢数据）。同时 Dell 的已完成结果也被整轮截止拖住。修复：**截止时间改为每 BMC 独立**；超时的 BMC 发布 `redfish_up=0` 快照（不静默消失）。
+
+**Files:**
+- Modify: `src/scraper.rs`（per-BMC deadline + 超时发布 up=0）
+- Test: `tests/scraper_test.rs`
+
+**Interfaces:**
+- Consumes: 现有 `collect_all`、`build_registry`、`Snapshot::update`。
+- Produces:
+  - `src/scraper.rs` 新 helper：`async fn with_deadline<T>(timeout: Duration, fut: impl Future<Output = T>) -> Option<T>`（None = 超时）。
+  - 行为变化：每 BMC 任务 = `with_deadline(self.timeout, collect_all(...))`；`Some(report)` → 正常发布；`None`（超时）→ 发布 `ScrapeReport { metrics: [up=0], failed_resources: ["timeout"] }`（复用现有失败发布路径，见 scraper.rs:120-136 的构造模式）；移除整轮 `timeout(self.timeout, collect)`（collect 循环保留，等全部 BMC 任务结束）。
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/scraper_test.rs` 追加：
+```rust
+#[tokio::test(start_paused = true)]
+async fn with_deadline_times_out() {
+    use redfish_exporter::scraper::with_deadline;
+    use std::time::Duration;
+    let never = async { tokio::time::sleep(Duration::from_secs(3600)).await; 42 };
+    let result = tokio::time::timeout(Duration::from_secs(1), with_deadline(Duration::from_secs(1), never)).await;
+    assert!(result.is_ok()); // 内部 deadline 先触发
+    assert_eq!(result.unwrap(), None);
+}
+
+#[tokio::test]
+async fn with_deadline_completes_in_time() {
+    use redfish_exporter::scraper::with_deadline;
+    use std::time::Duration;
+    let ok = async { 7 };
+    assert_eq!(with_deadline(Duration::from_secs(1), ok).await, Some(7));
+}
+```
+先运行确认失败（`with_deadline` 未定义）。
+
+- [ ] **Step 2: 实现 with_deadline**
+
+`src/scraper.rs`：
+```rust
+pub async fn with_deadline<T>(timeout: Duration, fut: impl Future<Output = T>) -> Option<T> {
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(v) => Some(v),
+        Err(_) => None,
+    }
+}
+```
+
+- [ ] **Step 3: 改造 scrape_once 为 per-BMC deadline**
+
+`scrape_once` 中每个 BMC 任务改为：
+```rust
+set.spawn(async move {
+    let result = match with_deadline(round_timeout, collect_all(Arc::clone(&bmc), &name)).await {
+        Some(Ok(report)) => Ok(report),
+        Some(Err(err)) if auth == AuthMethod::Session && is_unauthorized(&err) => { /* 现有重登逻辑不变，重登重试也套 with_deadline */ }
+        Some(Err(err)) => Err(err),
+        None => Err(anyhow::anyhow!("round timed out for bmc")), // 或专用标记
+    };
+    (name, result)
+});
+```
+超时路径的标记：在 `Ok((name, Err(e)))` 分支已存在（scraper.rs:120-136）——它会发布 up=0 + failed ["bmc"]。为区分超时与普通失败，用错误字符串标记 `"bmc: timeout"` 并让 failed_resources 记 `"timeout"`；发布逻辑不变（超时也发布 up=0 快照）。注意：**超时不再调用 `set.shutdown()`**（不再中止其他 BMC），整轮 collect 循环自然收敛。
+
+- [ ] **Step 4: 测试通过**
+
+Run: `cargo test --test scraper_test`
+预期：PASS（两个新测试 + 现有全部）。
+
+- [ ] **Step 5: 收尾**
+
+```bash
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+git add src/scraper.rs tests/scraper_test.rs
+git commit -m "fix: per-BMC round deadline and publish redfish_up=0 on timeout"
+```
+
+---
+
+### Task 6B: 启动会话失败不退出（修复 AUDIT-2）
+
+**背景（审计证据）**：AUDIT-2 —— 浪潮 session 建立失败（create-session 响应缺 `Name` 字段）导致 `Scraper::new` 返回 Err → `main.rs:69/77 exit(1)`，**整个 exporter 启动即死**，所有 BMC（含健康的 Dell）全部不可用。修复：单 BMC 会话建立失败 → 降级 basic 认证继续运行 + 记 warn；每轮尝试补建会话。
+
+**Files:**
+- Modify: `src/bmc.rs`（`try_establish_session` 拆出可测函数）
+- Modify: `src/scraper.rs`（`new` 不再 fail-fast；每轮补建会话）
+- Test: `tests/bmc_test.rs`
+
+**Interfaces:**
+- Consumes: `establish_session`（bmc.rs，已泛型可 mock 测试）。
+- Produces:
+  - `bmc.rs`: `pub async fn try_establish_session<B: Bmc>(bmc: &Arc<B>, username: &str, password: &str) -> Result<String, BmcError>` —— 即现 `establish_session` 的语义（返回 token），保留 `establish_session` 名称亦可；关键是 scraper 不再传播其 Err。
+  - `scraper.rs`: `Scraper::new` 中 session 建立失败 → `warn!` + 该 BMC 保持 basic 凭据继续；`Scrape` 任务开头：`auth == Session && !session_established` 时尝试建立（成功则 `set_credentials(token)` 并标记，失败则继续 basic 采集并 `warn!`）。
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/bmc_test.rs` 追加（现有 mock session 测试模式）：
+```rust
+#[tokio::test]
+async fn try_establish_session_failure_returns_err_not_panic() {
+    // mock: ServiceRoot 正常；SessionService 链接存在；Sessions 集合存在；
+    // create_session 期望返回 Err(注入错误)（或响应缺少 auth token）
+    // 断言 establish_session 返回 Err（不 panic），错误为 BmcError::Session(_)
+}
+```
+先运行确认现有行为符合（该测试主要防回归：确保错误路径返回 Err 而非 panic）。
+
+- [ ] **Step 2: 实现 scraper 降级与补建**
+
+`src/scraper.rs`：
+- `BmcHandle` 增加 `session_established: bool`（bmc.rs 中定义；`make_bmc` 初始 `session_established = auth == AuthMethod::Session` 时 false）。
+- `Scraper::new`：session 分支改为：
+```rust
+if bmc_cfg.auth == AuthMethod::Session {
+    match establish_session(&handle.bmc, &bmc_cfg.username, bmc_cfg.password.expose()).await {
+        Ok(token) => { handle.bmc.set_credentials(BmcCredentials::token(token)); handle.session_established = true; }
+        Err(e) => { warn!(bmc = %bmc_cfg.name, error = %e, "session establishment failed, falling back to basic auth"); }
+    }
+}
+```
+（不再 `?` / 不再返回 Err → `Scraper::new` 对本场景不失败。）
+- `collect_round`（Task 7 定义）或现有任务闭包开头（Task 7 之前是 `collect_all` 闭包）：
+```rust
+if auth == AuthMethod::Session && !handle.session_established {
+    if let Ok(token) = establish_session(&bmc, &username, password.expose()).await {
+        bmc.set_credentials(BmcCredentials::token(token));
+        handle.session_established = true;
+        info!(bmc = %name, "session established on first round");
+    }
+}
+```
+（`session_established` 用 `Arc<AtomicBool>` 跨轮共享；Task 7 重写 scraper 时保留此字段。）
+
+- [ ] **Step 3: 测试通过**
+
+Run: `cargo test --test bmc_test`
+预期：PASS。
+
+- [ ] **Step 4: 收尾**
+
+```bash
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+git add src/bmc.rs src/scraper.rs tests/bmc_test.rs
+git commit -m "fix: degrade to basic auth on session establishment failure instead of aborting"
+```
+
+---
+
 ### Task 7: 分频采集（快/慢组）
 
 **Files:**
@@ -1677,12 +1831,20 @@ let root = match nv_redfish::ServiceRoot::new(Arc::clone(&bmc)).await {
     Ok(r) => r,
     Err(e) if is_not_found(&e) => {
         debug!(bmc = %name, error = %e, "service root 404, skipping round");
-        return Ok(finalize_report(name, vec![], vec![], started));
+        // 手动构造 up=0 快照（failed 为空 → 不计 scrape_errors_total）。
+        // 注意：不可用 finalize_report(name, vec![], vec![], started) —— 它产出 up=1.0，
+        // 与 404 跳过语义相反（实施时已确认并修正，勿改回）。
+        return Ok(ScrapeReport {
+            metrics: vec![Metric::gauge(UP.0, UP.1)
+                .label("bmc", name.to_string())
+                .build(0.0)],
+            failed_resources: vec![],
+        });
     }
     Err(e) => return Err(e),
 };
 ```
-（`started` 已在函数开头创建；`finalize_report` 产出的 up=0 快照保证 /metrics 持续有该 BMC 系列。）
+（404 跳过轮：发布 up=0、不计数错误；`started` 需在 root 获取之后创建。）
 
 - [ ] **Step 3: 测试通过**
 
