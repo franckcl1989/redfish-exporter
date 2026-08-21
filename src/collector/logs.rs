@@ -54,6 +54,15 @@ pub async fn collect_event_logs<B: Bmc>(
     Ok(out)
 }
 
+fn severity_label(severity: &nv_redfish::schema::log_entry::EventSeverity) -> &'static str {
+    match severity {
+        nv_redfish::schema::log_entry::EventSeverity::Ok => "OK",
+        nv_redfish::schema::log_entry::EventSeverity::Warning => "Warning",
+        nv_redfish::schema::log_entry::EventSeverity::Critical => "Critical",
+        nv_redfish::schema::log_entry::EventSeverity::UnsupportedValue => "UnsupportedValue",
+    }
+}
+
 fn push_entry(
     out: &mut Vec<Metric>,
     bmc_name: &str,
@@ -67,7 +76,7 @@ fn push_entry(
         .severity
         .as_ref()
         .and_then(|s| s.as_ref())
-        .map(|s| format!("{s:?}"))
+        .map(severity_label)
         .unwrap_or_default();
     let ts = entry
         .created
@@ -81,7 +90,7 @@ fn push_entry(
             .label("bmc", bmc_name.to_string())
             .label("manager", manager.to_string())
             .label("service", service.to_string())
-            .label("severity", severity)
+            .label("severity", severity.to_string())
             .label("message", message)
             .label("id", id)
             .build(ts),

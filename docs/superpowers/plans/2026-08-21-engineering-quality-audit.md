@@ -39,7 +39,7 @@
 
 运行（PowerShell，凭据用环境变量，不落任何仓库文件）：
 ```powershell
-$env:AUDIT_DELL_PASS = 'REDACTED-PASSWORD'; $env:AUDIT_INSPUR_PASS = 'REDACTED-PASSWORD'
+$env:AUDIT_DELL_PASS = '<REDACTED-PASSWORD>'; $env:AUDIT_INSPUR_PASS = '<REDACTED-PASSWORD>'
 $r = Invoke-WebRequest -Uri 'https://10.10.90.70/redfish/v1' -Headers @{Authorization='Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("root:$env:AUDIT_DELL_PASS"))} -SkipCertificateCheck -TimeoutSec 15
 $r.StatusCode; $r.Content.Substring(0, [Math]::Min(300, $r.Content.Length))
 ```
@@ -49,8 +49,8 @@ $r.StatusCode; $r.Content.Substring(0, [Math]::Min(300, $r.Content.Length))
 
 创建 `C:\Users\franck\AppData\Local\Temp\opencode\redfish-audit\creds.json`：
 ```json
-{"dells": {"host": "https://10.10.90.70", "user": "root", "pass": "REDACTED-PASSWORD"},
- "inspur": {"host": "https://10.10.90.80", "user": "admin", "pass": "REDACTED-PASSWORD"}}
+{"dells": {"host": "https://10.10.90.70", "user": "root", "pass": "<REDACTED-PASSWORD>"},
+ "inspur": {"host": "https://10.10.90.80", "user": "admin", "pass": "<REDACTED-PASSWORD>"}}
 ```
 确认该路径不在 git 仓库内（`git status` 无新文件）。
 
@@ -544,13 +544,13 @@ bmcs:
   - name: dells
     host: https://10.10.90.70
     username: root
-    password: REDACTED-PASSWORD
+    password: <REDACTED-PASSWORD>
     auth: session
     insecure_skip_verify: true
   - name: inspur
     host: https://10.10.90.80
     username: admin
-    password: REDACTED-PASSWORD
+    password: <REDACTED-PASSWORD>
     auth: session
     insecure_skip_verify: true
 ```

@@ -82,6 +82,12 @@ async fn collects_event_log_entries() {
         .collect();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].value, 1785585600.0); // 2026-08-01T12:00:00Z
+    let severity = entries[0]
+        .labels
+        .iter()
+        .find(|(k, _)| *k == "severity")
+        .map(|(_, v)| v.as_str());
+    assert_eq!(severity, Some("Critical"));
 }
 
 #[tokio::test]
@@ -117,4 +123,14 @@ async fn collects_event_log_entries_across_pages() {
     assert_eq!(entries.len(), 2);
     let ts: Vec<_> = entries.iter().map(|m| m.value).collect();
     assert_eq!(ts, vec![1785585600.0, 1785589200.0]); // 12:00Z, 13:00Z
+    let severities: Vec<_> = entries
+        .iter()
+        .map(|m| {
+            m.labels
+                .iter()
+                .find(|(k, _)| *k == "severity")
+                .map(|(_, v)| v.as_str())
+        })
+        .collect();
+    assert_eq!(severities, vec![Some("Critical"), Some("OK")]);
 }
