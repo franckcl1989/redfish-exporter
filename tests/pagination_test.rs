@@ -89,3 +89,32 @@ async fn rejects_cross_origin_next_link() {
     assert_eq!(pages[0]["Id"], "2");
     assert_eq!(pages[1]["Id"], "1");
 }
+
+#[tokio::test]
+async fn stops_on_repeated_next_link_loop() {
+    // 浪潮等 BMC 固件缺陷：nextLink 恒指同一 URL（$skip 被忽略）。
+    // 期望：抓两页后检测到循环停止，不无限抓取。
+    let bmc = Arc::new(Mock::default());
+    let url: ODataId = ENTRIES.to_string().into();
+    let looped = format!("{ENTRIES}?$skip=100&$top=100");
+    bmc.expect(Expect::get(
+        ENTRIES,
+        json!({
+            "@odata.id": ENTRIES,
+            "Members": [{"Id": "1"}],
+            "Members@odata.nextLink": looped,
+        }),
+    ));
+    bmc.expect(Expect::get(
+        &looped,
+        json!({
+            "@odata.id": looped,
+            "Members": [{"Id": "2"}],
+            "Members@odata.nextLink": looped,
+        }),
+    ));
+    let pages = fetch_all_pages(&bmc, &url).await.unwrap();
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[0]["Id"], "1");
+    assert_eq!(pages[1]["Id"], "2");
+}

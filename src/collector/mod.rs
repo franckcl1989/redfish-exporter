@@ -82,31 +82,31 @@ pub async fn collect_fast<B: Bmc>(
     let mut metrics = Vec::new();
     let mut failed_resources = Vec::new();
 
-    match sensors::collect_chassis_sensors(Arc::clone(&bmc), root, bmc_name).await {
+    match timed("sensors", bmc_name, sensors::collect_chassis_sensors(Arc::clone(&bmc), root, bmc_name)).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match power::collect_power_metrics(Arc::clone(&bmc), root, bmc_name).await {
+    match timed("power", bmc_name, power::collect_power_metrics(Arc::clone(&bmc), root, bmc_name)).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match processors::collect_processors(Arc::clone(&bmc), root, bmc_name).await {
+    match timed("processors", bmc_name, processors::collect_processors(Arc::clone(&bmc), root, bmc_name)).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match memory::collect_memory(Arc::clone(&bmc), root, bmc_name).await {
+    match timed("memory", bmc_name, memory::collect_memory(Arc::clone(&bmc), root, bmc_name)).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match systems::collect_systems(Arc::clone(&bmc), root, bmc_name).await {
+    match timed("systems", bmc_name, systems::collect_systems(Arc::clone(&bmc), root, bmc_name)).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match systems::collect_chassis_health(Arc::clone(&bmc), root, bmc_name).await {
+    match timed("chassis_health", bmc_name, systems::collect_chassis_health(Arc::clone(&bmc), root, bmc_name)).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match systems::collect_managers(Arc::clone(&bmc), root, bmc_name).await {
+    match timed("managers", bmc_name, systems::collect_managers(Arc::clone(&bmc), root, bmc_name)).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
@@ -126,27 +126,27 @@ pub async fn collect_slow<B: Bmc>(
     let mut metrics = Vec::new();
     let mut failed_resources = Vec::new();
 
-    match storage::collect_storage(Arc::clone(&bmc), root, bmc_name).await {
+    match timed("storage", bmc_name, storage::collect_storage(Arc::clone(&bmc), root, bmc_name)).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match network::collect_network(Arc::clone(&bmc), root, bmc_name).await {
+    match timed("network", bmc_name, network::collect_network(Arc::clone(&bmc), root, bmc_name)).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match systems::collect_firmware(Arc::clone(&bmc), root, bmc_name).await {
+    match timed("firmware", bmc_name, systems::collect_firmware(Arc::clone(&bmc), root, bmc_name)).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match systems::collect_assembly(Arc::clone(&bmc), root, bmc_name).await {
+    match timed("assembly", bmc_name, systems::collect_assembly(Arc::clone(&bmc), root, bmc_name)).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match logs::collect_event_logs(Arc::clone(&bmc), root, bmc_name).await {
+    match timed("event_logs", bmc_name, logs::collect_event_logs(Arc::clone(&bmc), root, bmc_name)).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match bios::collect_bios(Arc::clone(&bmc), root, bmc_name).await {
+    match timed("bios", bmc_name, bios::collect_bios(Arc::clone(&bmc), root, bmc_name)).await {
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
@@ -155,6 +155,22 @@ pub async fn collect_slow<B: Bmc>(
         metrics,
         failed_resources,
     })
+}
+
+/// 记录单个 collector 的耗时（debug 级），用于定位慢资源。
+async fn timed<F, T>(label: &'static str, bmc_name: &str, fut: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    let started = std::time::Instant::now();
+    let result = fut.await;
+    tracing::debug!(
+        bmc = bmc_name,
+        collector = label,
+        duration_ms = started.elapsed().as_millis(),
+        "collector done"
+    );
+    result
 }
 
 pub fn finalize_report(

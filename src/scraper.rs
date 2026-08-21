@@ -131,7 +131,9 @@ impl Scraper {
             let slow_state = Arc::clone(&slow_state);
             let sessions = Arc::clone(&sessions);
             set.spawn(async move {
-                let result = match with_deadline(timeout, async {
+                // 整轮不再套外层 deadline：快/慢组在 collect_round 内各自受 timeout 约束，
+                // 慢 BMC 的慢组超时不会拖死快组（见 collect_round）。
+                let result = async {
                     if auth == AuthMethod::Session
                         && !session_established.load(Ordering::SeqCst)
                     {
@@ -156,6 +158,7 @@ impl Scraper {
                         &name,
                         slow_interval,
                         Arc::clone(&slow_state),
+                        timeout,
                     )
                     .await
                     {
@@ -176,6 +179,7 @@ impl Scraper {
                                         &name,
                                         slow_interval,
                                         Arc::clone(&slow_state),
+                                        timeout,
                                     )
                                     .await
                                 }
@@ -191,12 +195,9 @@ impl Scraper {
                         }
                         Err(err) => Err(err),
                     }
-                })
+                }
                 .await
-                {
-                    Some(r) => r.map_err(|e| e.to_string()),
-                    None => Err("timeout".to_string()),
-                };
+                .map_err(|e| e.to_string());
                 (name, result)
             });
         }
@@ -259,11 +260,11 @@ impl Scraper {
     }
 }
 
-/// 慢组是否到点：无 slow_interval → 从不；无上次时间（首轮）→ 到点即采；
-/// 否则距上次采集已满 interval 才到点。
+/// 慢组是否到点：无 slow_interval → 每轮都采（= 0.1.0 全量行为）；
+/// 有 interval 且无上次时间（首轮）→ 到点即采；否则距上次采集已满 interval 才到点。
 pub fn slow_due(last: Option<Instant>, interval: Option<Duration>) -> bool {
     match interval {
-        None => false,
+        None => true,
         Some(interval) => last.map(|t| t.elapsed() >= interval).unwrap_or(true),
     }
 }
@@ -296,13 +297,15 @@ pub fn merge_round(
     merged
 }
 
-/// 单 BMC 单轮：快组必采，慢组按 slow_interval 到期才采（结果缓存跨轮复用）。
+/// 单 BMC 单轮：快组必采（独立 deadline），慢组按 slow_interval 到期才采（独立 deadline，
+/// 结果缓存跨轮复用）。快/慢组各自截止，慢 BMC 的慢组超时不再拖死快组、也不会饿死慢组缓存。
 /// 返回 nv_redfish::Error 而非 String，供 401 重登/404 判定直接匹配状态码。
 async fn collect_round(
     bmc: Arc<ConcreteBmc>,
     name: &str,
     slow_interval: Option<Duration>,
     slow_state: SlowState,
+    timeout: Duration,
 ) -> Result<ScrapeReport, nv_redfish::Error<ConcreteBmc>> {
     let root = match nv_redfish::ServiceRoot::new(Arc::clone(&bmc)).await {
         Ok(r) => r,
@@ -322,18 +325,35 @@ async fn collect_round(
         Err(e) => return Err(e),
     };
     let started = Instant::now();
-    let fast = match collect_fast(Arc::clone(&bmc), &root, name).await {
-        Ok(r) => r,
-        Err(resource) => ScrapeReport {
+    let fast = match with_deadline(timeout, collect_fast(Arc::clone(&bmc), &root, name)).await {
+        Some(Ok(r)) => r,
+        Some(Err(resource)) => ScrapeReport {
             metrics: vec![],
             failed_resources: vec![resource],
         },
+        None => {
+            warn!(bmc = %name, "fast group timed out after {:?}", timeout);
+            return Ok(ScrapeReport {
+                metrics: vec![
+                    Metric::gauge(UP.0, UP.1)
+                        .label("bmc", name.to_string())
+                        .build(0.0),
+                ],
+                failed_resources: vec!["fast:timeout".into()],
+            });
+        }
     };
     let cache = slow_state.lock().unwrap().get(name).cloned();
     let mut slow_report = cache.as_ref().and_then(|(_, r)| r.clone());
     let mut slow_failed = Vec::new();
     if slow_due(cache.as_ref().map(|(t, _)| *t), slow_interval) {
-        let result = collect_slow(Arc::clone(&bmc), &root, name).await;
+        let result = match with_deadline(timeout, collect_slow(Arc::clone(&bmc), &root, name)).await {
+            Some(r) => r,
+            None => {
+                warn!(bmc = %name, "slow group timed out after {:?}", timeout);
+                Err("slow:timeout".to_string())
+            }
+        };
         let (new_cache, failed) = apply_slow_result(cache, result, Instant::now());
         if failed.is_empty() {
             slow_report = new_cache.as_ref().and_then(|(_, r)| r.clone());
@@ -341,11 +361,16 @@ async fn collect_round(
                 slow_state.lock().unwrap().insert(name.to_string(), entry);
             }
         } else {
+            // 失败也更新时间戳：慢组按 slow_interval 节奏重试，避免每轮重试打爆慢 BMC。
             slow_failed = failed;
+            slow_state
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), (Instant::now(), slow_report.clone()));
             warn!(
                 bmc = %name,
                 resource = %slow_failed.join(","),
-                "slow group failed; keeping last-good slow metrics"
+                "slow group failed; keeping last-good slow metrics, retrying at next slow interval"
             );
         }
     }

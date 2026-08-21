@@ -55,13 +55,15 @@ impl EntityTypeRef for Page {
 /// 分页上限：防设备返回环状 nextLink 导致死循环。
 const MAX_PAGES: usize = 1000;
 
-/// 分页抓取集合，返回全部成员；无 nextLink 或达到上限时停止。
+/// 分页抓取集合，返回全部成员；无 nextLink、遇到重复 URL（设备分页缺陷防循环）或达到上限时停止。
 pub async fn fetch_all_pages<B: Bmc>(
     bmc: &Arc<B>,
     url: &ODataId,
 ) -> Result<Vec<Value>, nv_redfish::Error<B>> {
     let mut out = Vec::new();
     let mut next = url.clone();
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(next.to_string());
     for _ in 0..MAX_PAGES {
         let page = bmc
             .get::<Page>(&next)
@@ -74,6 +76,10 @@ pub async fn fetch_all_pages<B: Bmc>(
         let Some(resolved) = resolve_next_link(&next, link) else {
             return Ok(out);
         };
+        if !visited.insert(resolved.to_string()) {
+            tracing::warn!(url = %resolved, "pagination loop detected, stopping");
+            return Ok(out);
+        }
         next = resolved;
     }
     Ok(out)

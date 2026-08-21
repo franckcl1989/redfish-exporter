@@ -123,9 +123,9 @@ fn slow_report(value: f64) -> ScrapeReport {
 }
 
 #[test]
-fn slow_due_never_without_interval() {
-    assert!(!slow_due(None, None));
-    assert!(!slow_due(Some(Instant::now()), None));
+fn slow_due_always_true_without_interval() {
+    assert!(slow_due(None, None));
+    assert!(slow_due(Some(Instant::now()), None));
 }
 
 #[test]
