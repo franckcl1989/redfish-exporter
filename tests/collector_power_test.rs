@@ -129,6 +129,155 @@ async fn collects_legacy_power_consumption() {
 }
 
 #[tokio::test]
+async fn collects_power_metrics_and_psu_details() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_chassis_collection(&bmc);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/1",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis/1",
+            "Id": "1", "Name": "Chassis 1", "ChassisType": "RackMount",
+            "Power": { "@odata.id": "/redfish/v1/Chassis/1/Power" },
+        }),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/1/Power",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis/1/Power",
+            "Id": "Power", "Name": "Power",
+            "PowerControl": [{
+                "@odata.id": "/redfish/v1/Chassis/1/Power#/PowerControl/1",
+                "MemberId": "1", "Name": "Total",
+                "PowerConsumedWatts": 320.0,
+                "PowerMetrics": {
+                    "IntervalInMin": 10,
+                    "MinConsumedWatts": 280.0,
+                    "MaxConsumedWatts": 350.0,
+                    "AverageConsumedWatts": 310.0,
+                },
+            }],
+            "PowerSupplies": [{
+                "@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/1",
+                "MemberId": "1", "Name": "PSU1",
+                "PowerOutputWatts": 150.0,
+                "EfficiencyPercent": 94.0,
+                "LineInputVoltage": 230.0,
+                "PowerCapacityWatts": 750.0,
+                "PowerInputWatts": 160.0,
+                "Status": { "Health": "OK", "State": "Enabled" },
+            }],
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_power_metrics(bmc, &root, "bmc1").await.unwrap();
+
+    let consumption = metrics
+        .iter()
+        .filter(|m| {
+            matches!(
+                m.name,
+                "redfish_power_consumption_min_watts"
+                    | "redfish_power_consumption_max_watts"
+                    | "redfish_power_consumption_avg_watts"
+                    | "redfish_power_consumption_interval_minutes"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(consumption.len(), 4);
+    let values: HashMap<_, _> = consumption.iter().map(|m| (m.name, m.value)).collect();
+    assert_eq!(
+        values.get("redfish_power_consumption_min_watts"),
+        Some(&280.0)
+    );
+    assert_eq!(
+        values.get("redfish_power_consumption_max_watts"),
+        Some(&350.0)
+    );
+    assert_eq!(
+        values.get("redfish_power_consumption_avg_watts"),
+        Some(&310.0)
+    );
+    assert_eq!(
+        values.get("redfish_power_consumption_interval_minutes"),
+        Some(&10.0)
+    );
+    for m in consumption {
+        let labels: HashMap<_, _> = m.labels.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        assert_eq!(labels.get("bmc"), Some(&"bmc1"));
+        assert_eq!(labels.get("chassis"), Some(&"1"));
+    }
+
+    let psus = metrics
+        .iter()
+        .filter(|m| m.name.starts_with("redfish_power_supply_"))
+        .collect::<Vec<_>>();
+    assert_eq!(psus.len(), 4);
+    let values: HashMap<_, _> = psus.iter().map(|m| (m.name, m.value)).collect();
+    assert_eq!(
+        values.get("redfish_power_supply_efficiency_percent"),
+        Some(&94.0)
+    );
+    assert_eq!(values.get("redfish_power_supply_input_watts"), Some(&160.0));
+    assert_eq!(
+        values.get("redfish_power_supply_capacity_watts"),
+        Some(&750.0)
+    );
+    assert_eq!(
+        values.get("redfish_power_supply_input_voltage"),
+        Some(&230.0)
+    );
+    for m in psus {
+        let labels: HashMap<_, _> = m.labels.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        assert_eq!(labels.get("bmc"), Some(&"bmc1"));
+        assert_eq!(labels.get("chassis"), Some(&"1"));
+        assert_eq!(labels.get("id"), Some(&"1"));
+    }
+}
+
+#[tokio::test]
+async fn no_power_metrics_no_stats_series() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_chassis_collection(&bmc);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/1",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis/1",
+            "Id": "1", "Name": "Chassis 1", "ChassisType": "RackMount",
+            "Power": { "@odata.id": "/redfish/v1/Chassis/1/Power" },
+        }),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/1/Power",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis/1/Power",
+            "Id": "Power", "Name": "Power",
+            "PowerControl": [{
+                "@odata.id": "/redfish/v1/Chassis/1/Power#/PowerControl/1",
+                "MemberId": "1", "Name": "Total",
+                "PowerConsumedWatts": 320.0,
+            }],
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_power_metrics(bmc, &root, "bmc1").await.unwrap();
+    assert!(
+        metrics
+            .iter()
+            .any(|m| m.name == "redfish_power_consumption_watts" && m.value == 320.0)
+    );
+    assert!(
+        !metrics
+            .iter()
+            .any(|m| m.name.starts_with("redfish_power_consumption_min")),
+        "min series must be absent when PowerMetrics is missing"
+    );
+}
+
+#[tokio::test]
 async fn no_thermal_power_links_is_ok() {
     let bmc = Arc::new(Mock::default());
     expect_service_root(&bmc);

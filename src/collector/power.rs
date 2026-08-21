@@ -1,5 +1,9 @@
 use crate::collector::status_labels;
-use crate::metrics::{Metric, POWER_CONSUMPTION, SENSOR_READING, unbox_reading};
+use crate::metrics::{
+    Metric, POWER_CONSUMPTION, POWER_CONSUMPTION_AVG, POWER_CONSUMPTION_INTERVAL,
+    POWER_CONSUMPTION_MAX, POWER_CONSUMPTION_MIN, POWER_SUPPLY_CAPACITY, POWER_SUPPLY_EFFICIENCY,
+    POWER_SUPPLY_INPUT_VOLTAGE, POWER_SUPPLY_INPUT_WATTS, SENSOR_READING, unbox_reading,
+};
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
 use nv_redfish::chassis::Chassis;
@@ -136,6 +140,36 @@ async fn collect_legacy_power<B: Bmc>(
             .label("chassis", chassis_id.to_string())
             .build(consumed),
     );
+    if let Some(pm) = &power_control.power_metrics {
+        push_power_stat(
+            out,
+            bmc_name,
+            chassis_id,
+            POWER_CONSUMPTION_MIN,
+            unbox_reading(pm.min_consumed_watts),
+        );
+        push_power_stat(
+            out,
+            bmc_name,
+            chassis_id,
+            POWER_CONSUMPTION_MAX,
+            unbox_reading(pm.max_consumed_watts),
+        );
+        push_power_stat(
+            out,
+            bmc_name,
+            chassis_id,
+            POWER_CONSUMPTION_AVG,
+            unbox_reading(pm.average_consumed_watts),
+        );
+        push_power_stat(
+            out,
+            bmc_name,
+            chassis_id,
+            POWER_CONSUMPTION_INTERVAL,
+            pm.interval_in_min.flatten().map(|v| v as f64),
+        );
+    }
     legacy_power_supplies(bmc, bmc_name, chassis_id, &power, out).await
 }
 
@@ -169,6 +203,39 @@ async fn legacy_power_supplies<B: Bmc>(
             state,
         };
         push_sensor_reading(out, bmc_name, chassis_id, &labels, reading);
+        let id = supply.base.member_id.clone();
+        push_psu_metric(
+            out,
+            bmc_name,
+            chassis_id,
+            &id,
+            POWER_SUPPLY_EFFICIENCY,
+            unbox_reading(supply.efficiency_percent),
+        );
+        push_psu_metric(
+            out,
+            bmc_name,
+            chassis_id,
+            &id,
+            POWER_SUPPLY_INPUT_WATTS,
+            unbox_reading(supply.power_input_watts),
+        );
+        push_psu_metric(
+            out,
+            bmc_name,
+            chassis_id,
+            &id,
+            POWER_SUPPLY_CAPACITY,
+            unbox_reading(supply.power_capacity_watts),
+        );
+        push_psu_metric(
+            out,
+            bmc_name,
+            chassis_id,
+            &id,
+            POWER_SUPPLY_INPUT_VOLTAGE,
+            unbox_reading(supply.line_input_voltage),
+        );
     }
     Ok(())
 }
@@ -354,6 +421,44 @@ fn push_threshold(
             .label("sensor_type", labels.sensor_type.clone())
             .label("health", labels.health.clone())
             .label("state", labels.state.clone())
+            .build(value),
+    );
+}
+
+fn push_power_stat(
+    out: &mut Vec<Metric>,
+    bmc_name: &str,
+    chassis_id: &str,
+    name_help: (&'static str, &'static str),
+    value: Option<f64>,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    out.push(
+        Metric::gauge(name_help.0, name_help.1)
+            .label("bmc", bmc_name.to_string())
+            .label("chassis", chassis_id.to_string())
+            .build(value),
+    );
+}
+
+fn push_psu_metric(
+    out: &mut Vec<Metric>,
+    bmc_name: &str,
+    chassis_id: &str,
+    id: &str,
+    name_help: (&'static str, &'static str),
+    value: Option<f64>,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    out.push(
+        Metric::gauge(name_help.0, name_help.1)
+            .label("bmc", bmc_name.to_string())
+            .label("chassis", chassis_id.to_string())
+            .label("id", id.to_string())
             .build(value),
     );
 }

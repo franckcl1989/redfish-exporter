@@ -21,6 +21,38 @@ pub const POWER_CONSUMPTION: (&str, &str) = (
     "redfish_power_consumption_watts",
     "Total chassis power consumption in watts",
 );
+pub const POWER_CONSUMPTION_MIN: (&str, &str) = (
+    "redfish_power_consumption_min_watts",
+    "Minimum chassis power consumption in watts over the measurement window",
+);
+pub const POWER_CONSUMPTION_MAX: (&str, &str) = (
+    "redfish_power_consumption_max_watts",
+    "Maximum chassis power consumption in watts over the measurement window",
+);
+pub const POWER_CONSUMPTION_AVG: (&str, &str) = (
+    "redfish_power_consumption_avg_watts",
+    "Average chassis power consumption in watts over the measurement window",
+);
+pub const POWER_CONSUMPTION_INTERVAL: (&str, &str) = (
+    "redfish_power_consumption_interval_minutes",
+    "Power consumption measurement window in minutes",
+);
+pub const POWER_SUPPLY_EFFICIENCY: (&str, &str) = (
+    "redfish_power_supply_efficiency_percent",
+    "Power supply efficiency in percent",
+);
+pub const POWER_SUPPLY_INPUT_WATTS: (&str, &str) = (
+    "redfish_power_supply_input_watts",
+    "Power supply input power in watts",
+);
+pub const POWER_SUPPLY_CAPACITY: (&str, &str) = (
+    "redfish_power_supply_capacity_watts",
+    "Power supply rated capacity in watts",
+);
+pub const POWER_SUPPLY_INPUT_VOLTAGE: (&str, &str) = (
+    "redfish_power_supply_input_voltage",
+    "Power supply line input voltage in volts",
+);
 pub const POWER_INPUT: (&str, &str) = ("redfish_power_input_watts", "Chassis power input in watts");
 pub const POWER_STATE: (&str, &str) = ("redfish_power_state", "Power state of a system, 1 = On");
 #[allow(dead_code)] // 0.1.0 未实现（处理器利用率由 PROCESSOR_BANDWIDTH 采集），docs 记录
