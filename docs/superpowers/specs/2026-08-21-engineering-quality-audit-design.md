@@ -102,7 +102,7 @@
 | D2 | 每 collector 重复遍历 collection（N×walk，design.md 已承认） | P2 | — |
 | D3 | 无 nextLink 分页，大集合截断 | P2（大 SEL/多盘场景） | 三项目也无，属超越 |
 | D4 | 无 404 快速跳过/重试策略，BMC 瞬时 404 直接计入失败 | P2 | fishymetrics |
-| D5 | **无 per-BMC 并发上限**：JoinSet 7+ collector 并行打同一 BMC，弱 BMC 可能拒绝/降速 | P1 | idrac 信号量 |
+| D5 | ~~无 per-BMC 并发上限：JoinSet 7+ collector 并行打同一 BMC~~ **已复核修正**：`collect_all` 内各 collector 是顺序 await 的（collector/mod.rs:80-123），单 BMC 请求并发恒为 1，不存在冲击 BMC 问题；真正的负载问题是每轮请求总数高（同 D2）。跨 BMC 并行（JoinSet）是刻意设计，保留 | 已消除 | — |
 | D6 | 无 build_info / scrape_errors_total 自观测 | P2 | idrac/fishymetrics |
 | D7 | 无 /discover、/reload、/info 端点 | P3 | idrac/fishymetrics |
 | D8 | 会话不清理：退出/重登后 BMC 端残留会话 | P2（安全/资源） | — |
@@ -143,8 +143,8 @@ config:
   slow_interval: 300s          # 慢组周期（新，= N×快组）
 ```
 
-- **快组（每轮）**：`sensors`、`power`、`processors`、`memory`、`systems`（up/健康/信息）
-- **慢组（每 slow_interval）**：`storage`（驱动/卷明细）、`network`（适配器/端口明细）、`firmware`（固件清单）、新增 `event_log`、新增 `bios`
+- **快组（每轮）**：`sensors`、`power`、`processors`、`memory`、`systems`（collect_systems）、`chassis_health`、`managers`（up/健康/信息）
+- **慢组（每 slow_interval）**：`storage`（驱动/卷明细）、`network`（适配器/端口明细）、`firmware`（固件清单）、`assembly`、新增 `event_log`、新增 `bios`
 - 实现：scraper.rs 中每个 BMC 记录 `last_slow_scrape`，每轮先采快组，慢组到期才采；`ScrapeReport` 增加来源标记或直接合并两组结果进同一 registry 原子更新（快照一致性不破坏）
 - 慢组期间 `/metrics` 继续提供旧快照（快组新数据 + 慢组旧数据共存于一次轮换中 → 需保证合并时序：慢组轮先采慢组再采快组，一次性 build_registry 发布）
 - 此设计不动 collector 接口与 nv 依赖链，纯编排层改动
@@ -166,9 +166,9 @@ config:
 | 分频采集（快/慢组） | 纯编排层，不涉 nv | 通过 | 探测延迟基准后确认 | 实现 |
 | 事件日志 | `log-services` 特性现成 | 通过（增量特性） | SEL 存在性探测 D 组 | 实现 |
 | BIOS 属性 | `bios` 特性现成 | 通过 | Bios 200/404 探测 B 组 | 实现 |
-| 内存纠错计数 | MemoryMetrics 类型（AlarmTrips 字段待 schema 确认） | 通过 | Metrics 存在性探测 B 组 | 实现 |
-| PSU 明细/功耗 min-max-avg | Power/PowerSupply 类型现成 | 通过 | F 组探测 | 实现 |
-| 并发上限 | `ConcurrencyLimitedBmc` 现成 | 通过（http-extras 特性） | 实跑观察 BMC 表现 | 实现 |
+| 内存纠错计数 | MemoryMetrics.health_data.alarm_trips 现成（bool） | 通过 | Metrics 存在性探测 B 组 | 实现 |
+| PSU 明细/功耗 min-max-avg | Power/PowerSupply/PowerMetrics 类型现成 | 通过 | F 组探测 | 实现 |
+| ~~并发上限~~ | ~~ConcurrencyLimitedBmc~~ | — | — | **已取消**（collector 顺序执行，无并发冲击；见 D5 修正） |
 | build_info/scrape_errors_total | 自研（exporter 层） | 通过 | — | 实现 |
 | 会话 shutdown 清理 | `Session::delete` 现成 | 通过 | 会话行为探测 A 组 | 实现 |
 | 404 快速跳过+计数 | 错误模型可区分 | 通过 | J/K 组实测 404 发生率 | 实现（轻量版：跳过+计数；重试不学 fishymetrics 的 3×2s） |
