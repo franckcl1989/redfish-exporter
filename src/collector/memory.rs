@@ -1,5 +1,8 @@
 use crate::collector::{push_health, push_info, status_labels};
-use crate::metrics::{MEMORY_BANDWIDTH, MEMORY_CAPACITY, Metric, unbox_reading};
+use crate::metrics::{
+    MEMORY_BANDWIDTH, MEMORY_CAPACITY, MEMORY_CORRECTABLE, MEMORY_UNCORRECTABLE, Metric,
+    unbox_reading,
+};
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
 use std::sync::Arc;
@@ -52,13 +55,42 @@ async fn collect_module<B: Bmc>(
     let Ok(Some(metrics)) = module.metrics().await else {
         return;
     };
+    let raw_metrics = metrics.raw();
     push_value(
         out,
         bmc_name,
         system_id,
         &id,
         MEMORY_BANDWIDTH,
-        unbox_reading(metrics.raw().bandwidth_percent),
+        unbox_reading(raw_metrics.bandwidth_percent),
+    );
+    if let Some(health_data) = &raw_metrics.health_data
+        && let Some(trips) = &health_data.alarm_trips
+    {
+        if let Some(Some(v)) = trips.correctable_ecc_error {
+            push_bool(out, bmc_name, system_id, &id, MEMORY_CORRECTABLE, v);
+        }
+        if let Some(Some(v)) = trips.uncorrectable_ecc_error {
+            push_bool(out, bmc_name, system_id, &id, MEMORY_UNCORRECTABLE, v);
+        }
+    }
+}
+
+fn push_bool(
+    out: &mut Vec<Metric>,
+    bmc_name: &str,
+    system_id: &str,
+    id: &str,
+    name_help: (&'static str, &'static str),
+    value: bool,
+) {
+    push_value(
+        out,
+        bmc_name,
+        system_id,
+        id,
+        name_help,
+        Some(if value { 1.0 } else { 0.0 }),
     );
 }
 

@@ -40,6 +40,14 @@ pub const MEMORY_BANDWIDTH: (&str, &str) = (
     "redfish_memory_bandwidth_percent",
     "Memory bandwidth utilization percentage",
 );
+pub const MEMORY_CORRECTABLE: (&str, &str) = (
+    "redfish_memory_correctable_errors",
+    "Memory correctable ECC alarm trip, 1 = tripped",
+);
+pub const MEMORY_UNCORRECTABLE: (&str, &str) = (
+    "redfish_memory_uncorrectable_errors",
+    "Memory uncorrectable ECC alarm trip, 1 = tripped",
+);
 pub const VOLUME_CAPACITY: (&str, &str) =
     ("redfish_volume_capacity_bytes", "Volume capacity in bytes");
 pub const DRIVE_CAPACITY: (&str, &str) =

@@ -271,6 +271,88 @@ async fn collects_memory_metrics() {
 }
 
 #[tokio::test]
+async fn collects_memory_ecc_alarm_trips() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, false, true);
+    expect_memory_collection(&bmc);
+    expect_memory(&bmc, true);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Systems/1/Memory/DIMM1/Metrics",
+        json!({
+            "@odata.id": "/redfish/v1/Systems/1/Memory/DIMM1/Metrics",
+            "Id": "Metrics", "Name": "Metrics",
+            "BandwidthPercent": 30.0,
+            "HealthData": {
+                "AlarmTrips": {
+                    "CorrectableECCError": true,
+                    "UncorrectableECCError": false,
+                }
+            },
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_memory(bmc, &root, "bmc1").await.unwrap();
+
+    let correctable: Vec<_> = metrics
+        .iter()
+        .filter(|m| m.name == "redfish_memory_correctable_errors")
+        .collect();
+    assert_eq!(correctable.len(), 1);
+    assert_eq!(correctable[0].value, 1.0);
+    let labels = labels_of(correctable[0]);
+    assert_eq!(labels.get("bmc"), Some(&"bmc1"));
+    assert_eq!(labels.get("system"), Some(&"1"));
+    assert_eq!(labels.get("id"), Some(&"DIMM1"));
+
+    let uncorrectable: Vec<_> = metrics
+        .iter()
+        .filter(|m| m.name == "redfish_memory_uncorrectable_errors")
+        .collect();
+    assert_eq!(uncorrectable.len(), 1);
+    assert_eq!(uncorrectable[0].value, 0.0);
+    let labels = labels_of(uncorrectable[0]);
+    assert_eq!(labels.get("bmc"), Some(&"bmc1"));
+    assert_eq!(labels.get("system"), Some(&"1"));
+    assert_eq!(labels.get("id"), Some(&"DIMM1"));
+}
+
+#[tokio::test]
+async fn memory_metrics_without_health_data_emit_no_error_series() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, false, true);
+    expect_memory_collection(&bmc);
+    expect_memory(&bmc, true);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Systems/1/Memory/DIMM1/Metrics",
+        json!({
+            "@odata.id": "/redfish/v1/Systems/1/Memory/DIMM1/Metrics",
+            "Id": "Metrics", "Name": "Metrics",
+            "BandwidthPercent": 30.0,
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_memory(bmc, &root, "bmc1").await.unwrap();
+
+    assert!(
+        !metrics
+            .iter()
+            .any(|m| m.name == "redfish_memory_correctable_errors"
+                || m.name == "redfish_memory_uncorrectable_errors")
+    );
+    assert!(
+        metrics
+            .iter()
+            .any(|m| m.name == "redfish_memory_bandwidth_percent")
+    );
+}
+
+#[tokio::test]
 async fn missing_metrics_links_produce_info_only() {
     let bmc = Arc::new(Mock::default());
     expect_service_root(&bmc);
