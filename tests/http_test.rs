@@ -10,6 +10,7 @@ use redfish_exporter::config::{
 use redfish_exporter::http::router;
 use redfish_exporter::metrics::Metric;
 use redfish_exporter::registry::Snapshot;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -463,4 +464,109 @@ async fn auth_disabled_keeps_open_access() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn load_tls_rejects_invalid_pem() {
+    let dir = temp_config_dir();
+    std::fs::write(dir.join("cert.pem"), "not a pem").unwrap();
+    std::fs::write(dir.join("key.pem"), "also not a pem").unwrap();
+    let web = WebConfig {
+        auth_token: None,
+        tls_cert_file: Some(dir.join("cert.pem")),
+        tls_key_file: Some(dir.join("key.pem")),
+    };
+    assert!(redfish_exporter::http::load_tls(&web).await.is_err());
+    cleanup(&dir);
+}
+
+#[tokio::test]
+async fn tls_end_to_end_with_self_signed_cert() {
+    let dir = temp_config_dir();
+    let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+    let cert_path = dir.join("cert.pem");
+    let key_path = dir.join("key.pem");
+    std::fs::write(&cert_path, cert.cert.pem()).unwrap();
+    std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
+    let web = WebConfig {
+        auth_token: None,
+        tls_cert_file: Some(cert_path),
+        tls_key_file: Some(key_path),
+    };
+    let tls = redfish_exporter::http::load_tls(&web)
+        .await
+        .unwrap()
+        .expect("tls loaded");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let snap = Arc::new(Snapshot::new());
+    let app = test_router(snap, test_config(&[("bmc1", "https://10.0.0.1")]));
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let handle = tokio::spawn(async move {
+        redfish_exporter::http::serve_on(listener, app, Some(tls), Duration::from_secs(10), rx)
+            .await
+    });
+    // 等待监听就绪（TCP 连接探测）
+    let mut connected = false;
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(addr).is_ok() {
+            connected = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(connected, "server did not start");
+    // 信任证书的客户端成功
+    let trusting = reqwest::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(cert.cert.pem().as_bytes()).unwrap())
+        .build()
+        .unwrap();
+    let resp = trusting
+        .get(format!("https://{addr}/healthz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.text().await.unwrap(), "ok");
+    // 不信任证书的客户端失败（TLS 实际生效）
+    let plain = reqwest::Client::new();
+    assert!(
+        plain
+            .get(format!("https://{addr}/healthz"))
+            .send()
+            .await
+            .is_err()
+    );
+    let _ = tx.send(true);
+    handle.await.unwrap().unwrap();
+    cleanup(&dir);
+}
+
+// 多线程 runtime：测试线程会阻塞在 std TcpStream::read() 上，
+// 单线程 runtime 下服务端任务无法推进，header 超时永远不会触发。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn header_read_timeout_closes_idle_connection() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let snap = Arc::new(Snapshot::new());
+    let app = test_router(snap, test_config(&[("bmc1", "https://10.0.0.1")]));
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let handle = tokio::spawn(async move {
+        redfish_exporter::http::serve_on(listener, app, None, Duration::from_millis(300), rx).await
+    });
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut buf = [0u8; 16];
+    let started = std::time::Instant::now();
+    let n = stream.read(&mut buf);
+    let elapsed = started.elapsed();
+    assert!(
+        n.map(|n| n == 0).unwrap_or(true),
+        "expected connection closed by server (EOF)"
+    );
+    assert!(elapsed < Duration::from_secs(5), "timeout took {elapsed:?}");
+    let _ = tx.send(true);
+    handle.await.unwrap().unwrap();
 }

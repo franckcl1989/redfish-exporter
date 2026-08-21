@@ -1,5 +1,7 @@
+use std::net::TcpListener as StdTcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::Json;
@@ -9,6 +11,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use axum_server::tls_rustls::RustlsConfig;
 use tokio::sync::{RwLock, watch};
 use tracing::info;
 
@@ -136,26 +139,109 @@ async fn reload_handler(State(state): State<AppState>) -> Response {
     }
 }
 
+/// 默认 HTTP/1.1 header 读取超时（慢连接防护，spec §3.1）。
+pub const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 读取 web 节的 TLS 配置；未配置返回 Ok(None)（纯 HTTP）。失败即启动失败（fail-fast）。
+pub async fn load_tls(web: &crate::config::WebConfig) -> anyhow::Result<Option<RustlsConfig>> {
+    match (&web.tls_cert_file, &web.tls_key_file) {
+        (Some(cert), Some(key)) => {
+            let cfg = RustlsConfig::from_pem_file(cert, key)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to load TLS cert '{}' / key '{}'",
+                        cert.display(),
+                        key.display()
+                    )
+                })?;
+            Ok(Some(cfg))
+        }
+        (None, None) => Ok(None),
+        _ => unreachable!("cert/key pairing validated in load_config"),
+    }
+}
+
+/// 在已绑定的 listener 上服务（测试接缝：测试自建 listener 以获取端口 0 的实际地址）。
+/// stop 触发后优雅停机（axum-server Handle）。
+pub async fn serve_on(
+    listener: StdTcpListener,
+    router: Router,
+    tls: Option<RustlsConfig>,
+    header_read_timeout: Duration,
+    mut stop: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    // Windows：tokio/mio 的 from_std 要求 socket 已处于非阻塞模式，
+    // 否则 accept 出来的连接在 IOCP 下 I/O 永久挂起（blocking listener 直通）。
+    listener
+        .set_nonblocking(true)
+        .context("failed to set listener nonblocking")?;
+    let handle = axum_server::Handle::new();
+    let shutdown_handle = handle.clone();
+    tokio::spawn(async move {
+        let _ = stop.changed().await;
+        shutdown_handle.graceful_shutdown(None);
+    });
+    match tls {
+        // TLS 模式保留 HTTP/1.1 + HTTP/2 自动协商：握手阶段由 RustlsAcceptor
+        // 的 10s 握手超时防护，握手完成后 header 读超时生效。
+        Some(cfg) => {
+            let mut server = axum_server::from_tcp_rustls(listener, cfg)
+                .context("failed to start TLS server")?;
+            server
+                .http_builder()
+                .http1()
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(Some(header_read_timeout));
+            server
+                .handle(handle)
+                .serve(router.into_make_service())
+                .await
+                .context("http server error")
+        }
+        // 纯 HTTP 固定 HTTP/1.1：hyper-util 的版本探测阶段（读前 24 字节区分
+        // h2 前言）没有超时，若不固定则"连接后零字节"的慢连接（slowloris）
+        // 永远不会被关闭，header 读超时无法生效。
+        None => {
+            let mut server = axum_server::from_tcp(listener)
+                .context("failed to start server")?
+                .http1_only();
+            server
+                .http_builder()
+                .http1()
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(Some(header_read_timeout));
+            server
+                .handle(handle)
+                .serve(router.into_make_service())
+                .await
+                .context("http server error")
+        }
+    }
+}
+
 /// 绑定 `cfg.listen_addr` 并启动 HTTP 服务；`stop` 触发后优雅关闭。
 pub async fn serve(
     config: Arc<RwLock<Config>>,
     snapshot: Arc<Snapshot>,
     config_path: PathBuf,
-    mut stop: watch::Receiver<bool>,
+    stop: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let (listen_addr, auth_token) = {
+    let (listen_addr, web) = {
         let cfg = config.read().await;
-        (cfg.listen_addr, cfg.web.auth_token.clone())
+        (cfg.listen_addr, cfg.web.clone())
     };
-    let listener = tokio::net::TcpListener::bind(listen_addr)
-        .await
+    let tls = load_tls(&web).await?;
+    let listener = StdTcpListener::bind(listen_addr)
         .with_context(|| format!("failed to bind listen address {listen_addr}"))?;
-    info!(addr = %listen_addr, "http server listening");
-    axum::serve(listener, router(snapshot, config, config_path, auth_token))
-        .with_graceful_shutdown(async move {
-            let _ = stop.changed().await;
-        })
-        .await
-        .context("http server error")?;
-    Ok(())
+    info!(addr = %listen_addr, tls = tls.is_some(), "http server listening");
+    let auth_token = web.auth_token.clone();
+    serve_on(
+        listener,
+        router(snapshot, config, config_path, auth_token),
+        tls,
+        DEFAULT_HEADER_READ_TIMEOUT,
+        stop,
+    )
+    .await
 }
