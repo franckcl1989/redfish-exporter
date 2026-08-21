@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use tokio::sync::watch;
+use tokio::sync::{RwLock, watch};
 use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -40,11 +40,14 @@ async fn main() -> anyhow::Result<()> {
         cfg.listen_addr.set_port(port);
     }
 
+    let cfg = Arc::new(RwLock::new(cfg));
     let snapshot = Arc::new(Snapshot::new());
-    let scraper = Scraper::new(&cfg, Arc::clone(&snapshot)).await?;
+    let scraper_cfg = cfg.read().await;
+    let scraper = Scraper::new(&scraper_cfg, Arc::clone(&snapshot)).await?;
+    drop(scraper_cfg);
     let (stop_tx, stop_rx) = watch::channel(false);
 
-    let serve_fut = serve(&cfg, snapshot, stop_rx.clone());
+    let serve_fut = serve(cfg, snapshot, args.config, stop_rx.clone());
     let scraper_handle = scraper.run(stop_rx);
     let shutdown = async {
         shutdown_signal().await;
