@@ -6,12 +6,10 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-use crate::bmc::{
-    BmcHandle, HttpBmc, ReqwestClient, build_http_client, establish_session, is_unauthorized,
-    make_bmc,
-};
+use crate::bmc::{BmcHandle, build_http_client, establish_session, is_unauthorized, make_bmc};
+use crate::collector::error::{ConcreteBmc, is_not_found};
 use crate::collector::{ScrapeReport, collect_fast, collect_slow, finalize_report, merge_reports};
 use crate::config::{AuthMethod, Config};
 use crate::metrics::{Metric, UP};
@@ -22,7 +20,6 @@ pub async fn with_deadline<T>(timeout: Duration, fut: impl Future<Output = T>) -
     tokio::time::timeout(timeout, fut).await.ok()
 }
 
-type ConcreteBmc = HttpBmc<ReqwestClient>;
 type ConcreteSession = nv_redfish::session_service::Session<ConcreteBmc>;
 /// 每 BMC 慢组最近采集时间与结果缓存（跨轮复用）。
 type SlowState = Arc<Mutex<HashMap<String, (Instant, Option<ScrapeReport>)>>>;
@@ -307,7 +304,23 @@ async fn collect_round(
     slow_interval: Option<Duration>,
     slow_state: SlowState,
 ) -> Result<ScrapeReport, nv_redfish::Error<ConcreteBmc>> {
-    let root = nv_redfish::ServiceRoot::new(Arc::clone(&bmc)).await?;
+    let root = match nv_redfish::ServiceRoot::new(Arc::clone(&bmc)).await {
+        Ok(r) => r,
+        Err(e) if is_not_found(&e) => {
+            debug!(bmc = %name, error = %e, "service root 404, skipping round");
+            // 不按失败轮处理（不计 scrape_errors）：以 up=0 快照保 /metrics 序列，
+            // 结构同下方失败轮的手工 report（finalize_report 空 failed 会给 up=1，不可用）。
+            return Ok(ScrapeReport {
+                metrics: vec![
+                    Metric::gauge(UP.0, UP.1)
+                        .label("bmc", name.to_string())
+                        .build(0.0),
+                ],
+                failed_resources: vec![],
+            });
+        }
+        Err(e) => return Err(e),
+    };
     let started = Instant::now();
     let fast = match collect_fast(Arc::clone(&bmc), &root, name).await {
         Ok(r) => r,

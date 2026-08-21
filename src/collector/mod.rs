@@ -1,4 +1,5 @@
 pub mod bios;
+pub mod error;
 pub mod logs;
 pub mod memory;
 pub mod network;
