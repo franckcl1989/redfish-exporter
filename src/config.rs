@@ -7,6 +7,7 @@ use std::{
 };
 use thiserror::Error;
 use url::Url;
+use zeroize::Zeroize;
 
 #[derive(Clone)]
 pub struct SecretString(String);
@@ -16,6 +17,11 @@ impl SecretString {
     }
     pub fn expose(&self) -> &str {
         &self.0
+    }
+}
+impl Drop for SecretString {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 impl fmt::Debug for SecretString {

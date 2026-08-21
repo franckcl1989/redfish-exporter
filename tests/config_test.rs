@@ -78,6 +78,28 @@ fn secret_is_redacted_in_debug() {
 }
 
 #[test]
+fn secret_zeroizes_on_drop() {
+    // 与 zeroize crate 自身测试同法：记录缓冲区指针，drop 后读取原内存位置。
+    // 产品代码保持 #![forbid(unsafe_code)]，本测试是唯一的 unsafe 例外（验证类代码）。
+    let s = redfish_exporter::config::SecretString::new("super-secret-password-123".repeat(4));
+    let ptr = s.expose().as_ptr();
+    let len = s.expose().len();
+    let mut owned = std::mem::ManuallyDrop::new(s);
+    unsafe { std::mem::ManuallyDrop::drop(&mut owned) };
+    // 已释放内存由分配器保留（drop 与读取之间无新分配），内容可读
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    // Windows 堆释放时分配器（HeapFree）会向已释放块头部写入 16 字节空闲链表指针
+    // （drop 胶水顺序：本类型的 Drop 清零先执行，String 字段随后释放时才写入；
+    // glibc tcache 同理写入 8 字节），故只校验头部之后的字节——
+    // 实现前 RED 证据中密码明文即位于 16 字节之后，此断言仍可捕获未清零。
+    assert!(
+        bytes[16..].iter().all(|&b| b == 0),
+        "secret not zeroized: {:?}",
+        &bytes[..bytes.len().min(32)]
+    );
+}
+
+#[test]
 fn parses_slow_interval() {
     let p = write_tmp(
         "slow",
