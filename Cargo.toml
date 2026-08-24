@@ -37,6 +37,7 @@ zeroize = "1"
 
 [dev-dependencies]
 http-body-util = "0.1"
+sysinfo = "0.30"
 nv-redfish-bmc-mock = "0.15"
 rcgen = "0.13"
 # TLS 零字节慢连接测试的客户端（树中已存在，仅新增 dev 边）
