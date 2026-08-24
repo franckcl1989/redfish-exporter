@@ -39,6 +39,7 @@ See [`config.example.yaml`](config.example.yaml). All durations use `humantime` 
 | `scrape_timeout`         | `15s`         | Deadline for one scrape round; tasks are aborted when exceeded   |
 | `slow_interval`          | `null`        | Interval for slow-group collectors (storage, network, firmware, assembly, event logs, BIOS); `null` = collect every round |
 | `request_timeout`        | `10s`         | Per-request HTTP timeout, applied to every BMC request       |
+| `stability`                | defaults 3 / 60s / 300s | Failure cooldown: consecutive failed rounds before full cooldown, first backoff, backoff cap. Session-auth BMCs fall back to basic collection while session re-login backs off |
 | `web`                    | `null`        | Inbound hardening: auth_token (>=16 chars), auth_token_file (mutually exclusive), tls_cert_file + tls_key_file (must be set together) |
 | `bmcs`                   | required      | Non-empty list of BMC entries                                    |
 | `bmcs[].name`            | required      | Unique name, used as the `bmc` metric label                      |

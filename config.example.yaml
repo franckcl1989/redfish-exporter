@@ -4,6 +4,10 @@ scrape_interval: "30s"         # periodic scrape interval (default 30s)
 # slow_interval: "300s"        # optional: slow group (storage/network/firmware/assembly/event log/BIOS) interval (default: every round)
 scrape_timeout: "15s"          # per-round deadline (default 15s)
 request_timeout: "10s"         # per-request timeout (default 10s)
+stability:                    # failure cooldown / backoff (defaults shown)
+  cooldown_failures: 3        # consecutive failed rounds before full cooldown
+  cooldown_base: "60s"        # first backoff after cooldown starts
+  cooldown_max: "300s"        # backoff cap
 web:                           # optional inbound hardening (see docs/security.md)
   # auth_token: "change-me-at-least-16-chars"   # or auth_token_file: /path/to/token (mutually exclusive)
   # auth_token_file: null

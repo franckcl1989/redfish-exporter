@@ -73,6 +73,25 @@ Fast group (every round): sensors, power, processors, memory, system/chassis/man
 - **404 fast-skip**: if the ServiceRoot fetch returns 404, the round is skipped and an `up=0` snapshot without failed-resource accounting is published (`is_not_found` in `collector/error.rs`); other 404s still count as failed resources.
 - **Snapshot consistency**: the registry per BMC is built fresh each round and swapped in atomically, so `/metrics` always returns one consistent snapshot per BMC and never a partially-written one.
 
+## Adaptive scheduling (stability)
+
+Per-BMC state machine (`src/stability.rs`, wired in `src/scraper.rs`):
+
+- **Healthy** — normal collection; consecutive failed rounds (round error OR any `failed_resources`, i.e. `up=0` rounds) are counted.
+- **Cooling** — after `stability.cooldown_failures` consecutive failures the BMC is fully skipped (no requests); an `up=0` snapshot with `redfish_scrape_error{resource="cooldown"}` is published each round without incrementing `redfish_scrape_errors_total`. Retries follow exponential backoff `min(cooldown_max, cooldown_base × 2^n)`; success resets to Healthy.
+- **SessionDegraded** (session-auth BMCs only) — entered when a 401 re-login fails: basic credentials take over collection each round (up=1 achievable, marked with `redfish_scrape_error{resource="session-degraded"}=1`), while session re-establishment retries on the same backoff schedule; success returns to Healthy; consecutive basic failures also lead to Cooling.
+
+Config (frozen semantics for 0.1.0):
+
+```yaml
+stability:
+  cooldown_failures: 3     # consecutive failure threshold
+  cooldown_base: "60s"     # first backoff
+  cooldown_max: "300s"     # backoff cap
+```
+
+Mutex poisoning is recovered via `crate::recover_lock` (log + continue) instead of cascading panics.
+
 ## Known design trade-off (Ruling 7c)
 
 Each collector independently enumerates the `Chassis`/`Systems` collections, so the number of BMC requests per round is roughly **N × (collection walk)** where N = number of collectors (each collector re-fetches chassis/systems members and common collections). At the default 30 s interval this load is acceptable for typical single-BMC-in-band and out-of-band setups, and it keeps collectors strictly isolated (a new collector cannot break the resource walks of existing ones). Consolidating collection walks into a shared pre-fetch phase is a possible future optimization and should be revisited if request volume becomes a problem on large fleets.
