@@ -2,7 +2,9 @@ use redfish_exporter::collector::ScrapeReport;
 use redfish_exporter::collector::merge_reports;
 use redfish_exporter::metrics::{Metric, encode};
 use redfish_exporter::registry::{Snapshot, build_registry};
-use redfish_exporter::scraper::{apply_slow_result, merge_round, slow_due};
+use redfish_exporter::scraper::{
+    apply_slow_result, cooldown_report, merge_round, slow_due, with_degraded_mark,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -197,4 +199,29 @@ fn merge_round_dedupes_slow_failure_against_merged_failures() {
     };
     let merged = merge_round(fast, None, vec!["storage".into()]);
     assert_eq!(merged.failed_resources, vec!["storage"]);
+}
+
+#[test]
+fn cooldown_report_marks_cooldown_resource() {
+    let r = cooldown_report();
+    assert!(r.metrics.is_empty());
+    assert_eq!(r.failed_resources, vec!["cooldown".to_string()]);
+}
+
+#[test]
+fn degraded_mark_appends_scrape_error_series() {
+    let r = ScrapeReport {
+        metrics: vec![],
+        failed_resources: vec![],
+    };
+    let r = with_degraded_mark(r, "bmc1");
+    assert_eq!(r.failed_resources.len(), 0);
+    assert_eq!(r.metrics.len(), 1);
+    let m = &r.metrics[0];
+    assert_eq!(m.name, "redfish_scrape_error");
+    assert!(
+        m.labels
+            .iter()
+            .any(|(k, v)| *k == "resource" && v == "session-degraded")
+    );
 }

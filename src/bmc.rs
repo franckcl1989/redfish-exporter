@@ -18,6 +18,7 @@ pub enum BmcError {
     Session(String),
 }
 
+#[derive(Clone)]
 pub struct BmcHandle {
     pub name: String,
     pub bmc: Arc<HttpBmc<ReqwestClient>>,

@@ -11,10 +11,11 @@ use tracing::{debug, info, warn};
 use crate::bmc::{BmcHandle, build_http_client, establish_session, is_unauthorized, make_bmc};
 use crate::collector::error::{ConcreteBmc, is_not_found};
 use crate::collector::{ScrapeReport, collect_fast, collect_slow, finalize_report, merge_reports};
-use crate::config::{AuthMethod, Config};
-use crate::metrics::{Metric, UP};
+use crate::config::{AuthMethod, Config, StabilityConfig};
+use crate::metrics::{Metric, SCRAPE_ERROR, UP};
 use crate::recover_lock;
 use crate::registry::{Snapshot, build_registry};
+use crate::stability::{BmcState, RoundAction, RoundOutcome, on_round_result, round_action};
 
 /// 在 deadline 内运行 future；超时返回 None。
 pub async fn with_deadline<T>(timeout: Duration, fut: impl Future<Output = T>) -> Option<T> {
@@ -35,6 +36,10 @@ pub struct Scraper {
     slow_state: SlowState,
     sessions: SessionStore,
     snapshot: Arc<Snapshot>,
+    /// 自适应调度配置（冷却阈值与退避上下界）。
+    stability: StabilityConfig,
+    /// per-BMC 稳定性状态（Healthy/SessionDegraded/Cooling），跨轮累计。
+    states: HashMap<String, BmcState>,
 }
 
 impl Scraper {
@@ -77,11 +82,13 @@ impl Scraper {
             slow_state: Arc::new(Mutex::new(HashMap::new())),
             sessions,
             snapshot,
+            stability: cfg.stability.clone(),
+            states: HashMap::new(),
         })
     }
 
     /// 周期采集循环：每 tick 一轮，stop 信号在 tick 前触发则直接退出。
-    pub fn run(self, mut stop: tokio::sync::watch::Receiver<bool>) -> JoinHandle<()> {
+    pub fn run(mut self, mut stop: tokio::sync::watch::Receiver<bool>) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(self.interval);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -108,144 +115,135 @@ impl Scraper {
         })
     }
 
-    async fn scrape_once(&self) {
+    async fn scrape_once(&mut self) {
         let started = Instant::now();
         let bmc_count = self.bmcs.len();
         let timeout = self.timeout;
         let slow_interval = self.slow_interval;
+        let stability = self.stability.clone();
         let slow_state = Arc::clone(&self.slow_state);
         let sessions = Arc::clone(&self.sessions);
+        let now = Instant::now();
         let mut set = tokio::task::JoinSet::new();
+        let mut cooldowns = Vec::new();
         for handle in &self.bmcs {
-            let name = handle.name.clone();
-            let bmc = Arc::clone(&handle.bmc);
-            let username = handle.username.clone();
-            let password = handle.password.clone();
-            let auth = handle.auth;
-            let session_established = Arc::clone(&handle.session_established);
+            let state = self
+                .states
+                .entry(handle.name.clone())
+                .or_insert(BmcState::Healthy { failures: 0 });
+            let action = round_action(state, now);
+            if matches!(action, RoundAction::CooldownWait) {
+                cooldowns.push(handle.name.clone());
+                continue;
+            }
+            let (attempt_session, use_basic_only) = match (action, &*state) {
+                (RoundAction::SessionRetry, _) => (true, false),
+                (RoundAction::Scrape, BmcState::SessionDegraded { .. }) => (false, true),
+                (RoundAction::Scrape, _) => (true, false),
+                (RoundAction::CooldownWait, _) => unreachable!(),
+            };
+            let handle = handle.clone();
             let slow_state = Arc::clone(&slow_state);
             let sessions = Arc::clone(&sessions);
             set.spawn(async move {
-                // 整轮不再套外层 deadline：快/慢组在 collect_round 内各自受 timeout 约束，
-                // 慢 BMC 的慢组超时不会拖死快组（见 collect_round）。
-                let result = async {
-                    if auth == AuthMethod::Session
-                        && !session_established.load(Ordering::SeqCst)
-                    {
-                        if let Ok(est) =
-                            establish_session(&bmc, &username, password.expose()).await
-                        {
-                            bmc.set_credentials(nv_redfish::bmc_http::BmcCredentials::token(
-                                est.token,
-                            ));
-                            session_established.store(true, Ordering::SeqCst);
-                            recover_lock(sessions.lock()).insert(name.clone(), est.session);
-                            info!(bmc = %name, "session established on first round");
-                        } else {
-                            warn!(
-                                bmc = %name,
-                                "session establishment failed, continuing with basic auth"
-                            );
-                        }
-                    }
-                    match collect_round(
-                        Arc::clone(&bmc),
-                        &name,
-                        slow_interval,
-                        Arc::clone(&slow_state),
-                        timeout,
-                    )
-                    .await
-                    {
-                        Ok(report) => Ok(report),
-                        Err(err) if auth == AuthMethod::Session && is_unauthorized(&err) => {
-                            info!(bmc = %name, "session rejected with 401, re-establishing session");
-                            // 重登前切回 basic 凭据：establish_session 的 ServiceRoot/SessionService
-                            // 请求若仍带已失效的 X-Auth-Token 会继续 401，导致无法恢复。
-                            bmc.set_credentials(nv_redfish::bmc_http::BmcCredentials::username_password(
-                                username.clone(),
-                                Some(password.expose().to_string()),
-                            ));
-                            match establish_session(&bmc, &username, password.expose()).await {
-                                Ok(est) => {
-                                    bmc.set_credentials(
-                                        nv_redfish::bmc_http::BmcCredentials::token(est.token),
-                                    );
-                                    // 旧会话已因 401 过期（token 失效），无需 delete 清理；
-                                    // 仅更新存储的会话句柄供 shutdown 删除。
-                                    recover_lock(sessions.lock()).insert(name.clone(), est.session);
-                                    info!(bmc = %name, "session re-established, retrying scrape");
-                                    collect_round(
-                                        Arc::clone(&bmc),
-                                        &name,
-                                        slow_interval,
-                                        Arc::clone(&slow_state),
-                                        timeout,
-                                    )
-                                    .await
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        bmc = %name,
-                                        error = %e,
-                                        "session re-establishment failed"
-                                    );
-                                    Err(err)
-                                }
-                            }
-                        }
-                        Err(err) => Err(err),
-                    }
-                }
-                .await
-                .map_err(|e| e.to_string());
-                (name, result)
+                let outcome = run_bmc_round(
+                    &handle,
+                    slow_interval,
+                    &slow_state,
+                    &sessions,
+                    timeout,
+                    attempt_session,
+                    use_basic_only,
+                )
+                .await;
+                (handle.name.clone(), outcome)
             });
+        }
+        for name in &cooldowns {
+            // 冷却等待轮：不发请求，直接发布 up=0 + resource=cooldown，不累计 errors_total。
+            match build_registry(name, &cooldown_report(), self.snapshot.scrape_errors(name)).await
+            {
+                Ok(reg) => {
+                    self.snapshot.update(name, reg);
+                    info!(bmc = %name, "bmc in cooldown, round skipped");
+                }
+                Err(e) => warn!(bmc = %name, error = %e, "failed to build cooldown registry"),
+            }
         }
         while let Some(res) = set.join_next().await {
             match res {
-                Ok((name, Ok(report))) => {
-                    let n = report.failed_resources.len() as u64;
-                    self.snapshot.record_scrape_errors(&name, n);
-                    match build_registry(&name, &report, self.snapshot.scrape_errors(&name)).await {
-                        Ok(reg) => {
-                            self.snapshot.update(&name, reg);
-                            info!(
-                                bmc = %name,
-                                failed = report.failed_resources.len(),
-                                "scrape complete"
-                            );
+                Ok((name, outcome)) => {
+                    let state = self
+                        .states
+                        .entry(name.clone())
+                        .or_insert(BmcState::Healthy { failures: 0 });
+                    let failed = outcome
+                        .report
+                        .as_ref()
+                        .map(|r| !r.failed_resources.is_empty())
+                        .unwrap_or(true);
+                    *state = on_round_result(state, &outcome, failed, &stability, Instant::now());
+                    match outcome.report {
+                        Some(report) => {
+                            // 会话降级标记（ruling Q2）：推进后仍处于 SessionDegraded 的成功轮
+                            // （纯 basic 兜底轮与重挂失败的兜底成功轮）追加
+                            // redfish_scrape_error{resource="session-degraded"}=1（spec §4.3「持续提示」）。
+                            // 标记以指标形式追加，failed_resources 保持为空 →
+                            // build_registry 不覆盖 up=1、不累计 errors_total。
+                            let degraded_mark = matches!(state, BmcState::SessionDegraded { .. });
+                            let report = if degraded_mark {
+                                with_degraded_mark(report, &name)
+                            } else {
+                                report
+                            };
+                            let n = report.failed_resources.len() as u64;
+                            self.snapshot.record_scrape_errors(&name, n);
+                            match build_registry(&name, &report, self.snapshot.scrape_errors(&name))
+                                .await
+                            {
+                                Ok(reg) => {
+                                    self.snapshot.update(&name, reg);
+                                    info!(
+                                        bmc = %name,
+                                        failed = report.failed_resources.len(),
+                                        state = ?state,
+                                        "scrape complete"
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(bmc = %name, error = %e, "failed to build registry")
+                                }
+                            }
                         }
-                        Err(e) => {
-                            warn!(bmc = %name, error = %e, "failed to build registry");
+                        None => {
+                            let timed_out = outcome.message.contains("timeout");
+                            let report = ScrapeReport {
+                                metrics: vec![
+                                    Metric::gauge(UP.0, UP.1)
+                                        .label("bmc", name.clone())
+                                        .build(0.0),
+                                ],
+                                failed_resources: if timed_out {
+                                    vec!["timeout".to_string()]
+                                } else {
+                                    vec!["bmc".to_string()]
+                                },
+                            };
+                            self.snapshot.record_scrape_errors(&name, 1);
+                            match build_registry(&name, &report, self.snapshot.scrape_errors(&name))
+                                .await
+                            {
+                                Ok(reg) => self.snapshot.update(&name, reg),
+                                Err(e) => {
+                                    warn!(bmc = %name, error = %e, "failed to build registry")
+                                }
+                            }
+                            if timed_out {
+                                warn!(bmc = %name, state = ?state, "scrape timed out after {:?}", timeout);
+                            } else {
+                                warn!(bmc = %name, error = %outcome.message, state = ?state, "scrape failed");
+                            }
                         }
-                    }
-                }
-                Ok((name, Err(e))) => {
-                    let timed_out = e.contains("timeout");
-                    let report = ScrapeReport {
-                        metrics: vec![
-                            Metric::gauge(UP.0, UP.1)
-                                .label("bmc", name.clone())
-                                .build(0.0),
-                        ],
-                        failed_resources: if timed_out {
-                            vec!["timeout".to_string()]
-                        } else {
-                            vec!["bmc".to_string()]
-                        },
-                    };
-                    self.snapshot.record_scrape_errors(&name, 1);
-                    match build_registry(&name, &report, self.snapshot.scrape_errors(&name)).await {
-                        Ok(reg) => self.snapshot.update(&name, reg),
-                        Err(e) => {
-                            warn!(bmc = %name, error = %e, "failed to build registry");
-                        }
-                    }
-                    if timed_out {
-                        warn!(bmc = %name, "scrape timed out after {:?}", self.timeout);
-                    } else {
-                        warn!(bmc = %name, error = %e, "scrape failed");
                     }
                 }
                 Err(e) => {
@@ -259,6 +257,27 @@ impl Scraper {
             "scrape round complete"
         );
     }
+}
+
+/// 冷却等待轮的发布报告：up=0 + redfish_scrape_error{resource="cooldown"}（经 build_registry 生成），
+/// 不累计 scrape_errors_total。
+pub fn cooldown_report() -> ScrapeReport {
+    ScrapeReport {
+        metrics: vec![],
+        failed_resources: vec!["cooldown".to_string()],
+    }
+}
+
+/// 会话降级标记：basic 兜底成功轮追加 redfish_scrape_error{resource="session-degraded"}=1
+/// （保持 up=1——failed_resources 为空不会触发 build_registry 的 up=0 覆盖）。
+pub fn with_degraded_mark(mut report: ScrapeReport, bmc_name: &str) -> ScrapeReport {
+    report.metrics.push(
+        Metric::gauge(SCRAPE_ERROR.0, SCRAPE_ERROR.1)
+            .label("bmc", bmc_name.to_string())
+            .label("resource", "session-degraded".to_string())
+            .build(1.0),
+    );
+    report
 }
 
 /// 慢组是否到点：无 slow_interval → 每轮都采（= 0.1.0 全量行为）；
@@ -296,6 +315,126 @@ pub fn merge_round(
         }
     }
     merged
+}
+
+/// 单 BMC 单轮执行（含会话建立/401 重登），提取为 pub 接缝供真实 HTTP 故障注入测试（Task 5）。
+/// attempt_session：本轮是否尝试 session 建立/重登；use_basic_only：Degraded 的 basic 兜底轮（先切 basic 凭据）。
+pub async fn run_bmc_round(
+    handle: &BmcHandle,
+    slow_interval: Option<Duration>,
+    slow_state: &SlowState,
+    sessions: &SessionStore,
+    timeout: Duration,
+    attempt_session: bool,
+    use_basic_only: bool,
+) -> RoundOutcome {
+    let name = handle.name.clone();
+    let bmc = Arc::clone(&handle.bmc);
+    let username = handle.username.clone();
+    let password = handle.password.clone();
+    let auth = handle.auth;
+    let session_established = Arc::clone(&handle.session_established);
+
+    if use_basic_only {
+        bmc.set_credentials(nv_redfish::bmc_http::BmcCredentials::username_password(
+            username.clone(),
+            Some(password.expose().to_string()),
+        ));
+    }
+    // 轮首 session 建立（首轮 / SessionRetry 轮）：失败则 basic 兜底并记入 session_recovery_failed，
+    // 使重挂失败的兜底成功轮留在 SessionDegraded（而非误升 Healthy）；Healthy 首轮建立失败
+    // 按原行为 basic 兜底采集（成功轮 up=1 可达，不进降级）。
+    let mut session_recovery_failed = false;
+    if auth == AuthMethod::Session && attempt_session && !session_established.load(Ordering::SeqCst)
+    {
+        if let Ok(est) = establish_session(&bmc, &username, password.expose()).await {
+            bmc.set_credentials(nv_redfish::bmc_http::BmcCredentials::token(est.token));
+            session_established.store(true, Ordering::SeqCst);
+            recover_lock(sessions.lock()).insert(name.clone(), est.session);
+            info!(bmc = %name, "session established on first round");
+        } else {
+            warn!(bmc = %name, "session establishment failed, continuing with basic auth");
+            bmc.set_credentials(nv_redfish::bmc_http::BmcCredentials::username_password(
+                username.clone(),
+                Some(password.expose().to_string()),
+            ));
+            session_recovery_failed = true;
+        }
+    }
+    match collect_round(
+        Arc::clone(&bmc),
+        &name,
+        slow_interval,
+        Arc::clone(slow_state),
+        timeout,
+    )
+    .await
+    {
+        Ok(report) => RoundOutcome {
+            report: Some(report),
+            message: String::new(),
+            session_recovery_failed,
+            attempted_session: attempt_session,
+        },
+        Err(err) if auth == AuthMethod::Session && attempt_session && is_unauthorized(&err) => {
+            info!(bmc = %name, "session rejected with 401, re-establishing session");
+            // 重登前切回 basic 凭据：establish_session 的 ServiceRoot/SessionService
+            // 请求若仍带已失效的 X-Auth-Token 会继续 401，导致无法恢复。
+            bmc.set_credentials(nv_redfish::bmc_http::BmcCredentials::username_password(
+                username.clone(),
+                Some(password.expose().to_string()),
+            ));
+            match establish_session(&bmc, &username, password.expose()).await {
+                Ok(est) => {
+                    bmc.set_credentials(nv_redfish::bmc_http::BmcCredentials::token(est.token));
+                    // 旧会话已因 401 过期（token 失效），无需 delete 清理；
+                    // 仅更新存储的会话句柄供 shutdown 删除。
+                    recover_lock(sessions.lock()).insert(name.clone(), est.session);
+                    info!(bmc = %name, "session re-established, retrying scrape");
+                    match collect_round(
+                        Arc::clone(&bmc),
+                        &name,
+                        slow_interval,
+                        Arc::clone(slow_state),
+                        timeout,
+                    )
+                    .await
+                    {
+                        Ok(report) => RoundOutcome {
+                            report: Some(report),
+                            message: String::new(),
+                            session_recovery_failed: false,
+                            attempted_session: true,
+                        },
+                        Err(e) => RoundOutcome {
+                            report: None,
+                            message: e.to_string(),
+                            session_recovery_failed: false,
+                            attempted_session: true,
+                        },
+                    }
+                }
+                Err(e) => {
+                    warn!(bmc = %name, error = %e, "session re-establishment failed");
+                    // 会话已失效：复位建立标记（ruling Q1），使后续 SessionRetry 轮重新走
+                    // 轮首建立流程；否则重挂永不重试且 basic 成功轮会误升 Healthy。
+                    session_established.store(false, Ordering::SeqCst);
+                    RoundOutcome {
+                        report: None,
+                        message: err.to_string(),
+                        session_recovery_failed: true,
+                        attempted_session: true,
+                    }
+                }
+            }
+        }
+        Err(err) => RoundOutcome {
+            report: None,
+            message: err.to_string(),
+            session_recovery_failed: false,
+            attempted_session: attempt_session,
+        },
+    }
 }
 
 /// 单 BMC 单轮：快组必采（独立 deadline），慢组按 slow_interval 到期才采（独立 deadline，
