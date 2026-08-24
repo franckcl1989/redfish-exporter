@@ -184,10 +184,16 @@ pub fn register_into(
             .iter()
             .map(|n| lookup.get(n).copied().unwrap_or_default().to_string())
             .collect();
-        debug_assert_eq!(
-            label_values.len(),
-            names.len(),
-            "label cardinality mismatch for '{}'",
+        // 同一 metric 内 label 键重复时首值生效（lookup.entry 插入语义，后到的重复键被丢弃）；
+        // debug 构建下校验键集合大小 == label 数（不相等即存在重复键），release 下静默容忍。
+        debug_assert!(
+            m.labels
+                .iter()
+                .map(|(k, _)| *k)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == m.labels.len(),
+            "duplicate label keys in metric '{}' — first value wins",
             m.name
         );
         let gv = &vecs[&(m.name, m.help)];
@@ -212,6 +218,7 @@ pub fn encode_bytes(registry: &prometheus::Registry) -> Vec<u8> {
 }
 
 /// 编码写入调用方缓冲（可复用：clear 后重复调用避免反复增长分配）。
+/// 契约：本函数只追加写入、不负责清空——调用方复用缓冲前必须自行 `clear()`。
 pub fn encode_bytes_into(registry: &prometheus::Registry, out: &mut Vec<u8>) {
     use prometheus::{Encoder, TextEncoder};
     // 不变量：encode 写入 Vec<u8> 不会失败；失败即程序缺陷，panic 合理。

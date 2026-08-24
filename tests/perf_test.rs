@@ -58,7 +58,7 @@ async fn perf_benchmark_mock_pipeline() {
     let mut round_ms = Vec::with_capacity(ROUNDS);
     let mut encode_ms = Vec::with_capacity(ROUNDS);
     let mut hot_ms = Vec::with_capacity(ROUNDS);
-    let mut bytes_len = 0usize;
+    let mut bytes_lens = Vec::with_capacity(ROUNDS);
     let snap = Arc::new(Snapshot::new());
 
     for _ in 0..ROUNDS {
@@ -77,7 +77,7 @@ async fn perf_benchmark_mock_pipeline() {
         let te = Instant::now();
         let encoded = encode_bytes(&registry);
         encode_ms.push(te.elapsed().as_secs_f64() * 1000.0);
-        bytes_len = encoded.len();
+        bytes_lens.push(encoded.len());
 
         // 预编码 /metrics 热路径：拼接各 BMC 条目字节（单 BMC）
         snap.update("perf", registry);
@@ -100,8 +100,13 @@ async fn perf_benchmark_mock_pipeline() {
         .unwrap_or(0.0);
 
     let (rm, em, hm) = (median(&round_ms), median(&encode_ms), median(&hot_ms));
+    let hm_min = hot_ms.iter().cloned().fold(f64::INFINITY, f64::min);
+    let hm_max = hot_ms.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let bytes_min = *bytes_lens.iter().min().unwrap();
+    let bytes_max = *bytes_lens.iter().max().unwrap();
+    let bytes_med = median(&bytes_lens.iter().map(|&b| b as f64).collect::<Vec<_>>());
     println!(
-        "perf: rounds={ROUNDS} round_ms_med={rm:.2} encode_ms_med={em:.2} hot_path_ms_med={hm:.4} bytes={bytes_len} rss_mb={rss_mb:.1}"
+        "perf: rounds={ROUNDS} round_ms_med={rm:.2} encode_ms_med={em:.2} hot_path_ms_min={hm_min:.4}/med={hm:.4}/max={hm_max:.4} bytes_min={bytes_min}/med={bytes_med:.0}/max={bytes_max} rss_mb={rss_mb:.1}"
     );
     if std::env::var("PERF_ASSERT").is_ok() {
         assert!(hm < 10.0, "hot path median {hm}ms >= 10ms");

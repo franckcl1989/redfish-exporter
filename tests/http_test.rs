@@ -113,6 +113,7 @@ async fn body_text(resp: Response) -> String {
 }
 
 /// 语义冻结守护：快照存储的预编码字节与现场编码逐字节一致。
+/// 保护边界：钉住的是「快照存储字节 ≡ 现场 encode_bytes 输出」；旧 String 版 encode() 路径的同一性由 prometheus crate 的 encode/encode_utf8 等价性 + handler 测试的字面量内容断言间接保证（不再逐字节比对）。
 #[tokio::test]
 async fn snapshot_encoded_bytes_equal_live_encode() {
     let snap = Arc::new(Snapshot::new());

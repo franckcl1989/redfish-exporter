@@ -58,13 +58,16 @@ impl Snapshot {
     /// 插入或替换指定 BMC 的快照（原子，按 BMC 隔离）。发布时编码一次存入条目，
     /// /metrics 直接拼接预编码字节（编码成本移出请求路径）。
     pub fn update(&self, bmc_name: &str, registry: Arc<prometheus::Registry>) {
-        let mut scratch = recover_lock(self.scratch.lock());
-        scratch.clear();
-        encode_bytes_into(&registry, &mut scratch);
-        let entry = Arc::new(RegistryEntry {
-            registry,
-            encoded: scratch.clone(),
-        });
+        // 顺序说明：先在 scratch 锁内 encode + clone，释放 scratch 锁后再取 inner 写锁
+        // 插入——写锁只覆盖 insert 本身，发布路径的序列化面最小（scratch 为复用缓冲，
+        // 其锁只在编码期间被持有，不与写锁重叠）。
+        let encoded = {
+            let mut scratch = recover_lock(self.scratch.lock());
+            scratch.clear();
+            encode_bytes_into(&registry, &mut scratch);
+            scratch.clone()
+        };
+        let entry = Arc::new(RegistryEntry { registry, encoded });
         recover_lock(self.inner.write()).insert(bmc_name.to_string(), entry);
     }
 

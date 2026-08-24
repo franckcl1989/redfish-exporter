@@ -20,7 +20,7 @@
 | 标准（spec §10） | 结果 | 证据 |
 |---|---|---|
 | 1. 等价性测试 + 全部门禁 | ✅ PASS | `tests/http_test.rs` 字节等价测试通过；fmt/clippy/test/audit/deny 全绿（见 §验证清单） |
-| 2. mock 基准证据 | ✅ PASS | `perf: rounds=20 round_ms_med=0.33 encode_ms_med=0.07 hot_path_ms_med=0.0005 bytes=8896 rss_mb=10.5`（Task 3 输出，release + PERF_ASSERT=1；阈值 hot<10ms / encode<500ms / round<2000ms 余量巨大） |
+| 2. mock 基准证据 | ✅ PASS | `perf: rounds=20 round_ms_med=0.33 encode_ms_med=0.06 hot_path_ms_min=0.0003/med=0.0005/max=0.0028 bytes_min=8894/med=8896/max=8896 rss_mb=10.9`（perf_test 复测输出，release + PERF_ASSERT=1；Task 3 初测见其报告；阈值 hot<10ms / encode<500ms / round<2000ms 余量巨大） |
 | 3. 真机前后对比 | ✅ PASS | 见 §性能证据：轮耗时无回归；热路径服务器侧 curl p50 2.4 / 10.7ms（9765 序列 / 1.16MB，artifact 见 §性能证据） |
 | 4. 安全+稳定双回归 | ✅ PASS | 安全四套件 61 例 + 稳定三套件 40 例全绿；audit/deny 通过（见 §验证清单） |
 | 5. 文档与语义冻结 | ✅ PASS | `docs/design.md` 新增 Pre-encoded snapshot cache 条目；`encode()`（String 版）保留、`registry()` 返回类型不变、`Snapshot::update` 签名不变（语义冻结，Task 4 Self-Review 已核对） |
@@ -33,15 +33,15 @@
 |---|---|---|---|
 | /metrics 热延迟 | ~310ms（9745 序列，1.1MB） | curl p50 2.4 / 10.7ms（9765 序列，1.16MB，两次独立运行） | 服务器侧显著改善；残余为传输开销（见方法注） |
 | Dell 快组 / 全量轮 | ~3s / ~11s | 快组 3–5.4s / 全量 ~12s | 不变（BMC 请求主导） |
-| 浪潮快组轮 | 44–48s | 44.1 / 46.4 / 46.7 / 48.4s（4 轮） | 不变 |
-| 浪潮全量轮 | ~159s | 3 轮：round duration_ms 155730 / 155880 / 150999（per-BMC 152.4 / 155.9 / 150.9s；快照采样 `redfish_scrape_duration_seconds{bmc="inspur"}`=152.499714 取自第 4 轮全量轮） | 不变 |
-| mock 全量轮 / 编码 | — | 0.33ms / 0.07ms（中位数，Task 3） | 新基准 |
+| 浪潮快组轮 | 44–48s | 5 轮：round duration_ms 46411 / 48445 / 46749 / 28493 / 44052（`perf.out.log`；28493ms 为 failed=1 失败轮，其余 failed=0） | 不变 |
+| 浪潮全量轮 | ~159s | 3 轮：round duration_ms 155730 / 155880 / 150999（`perf.out.log`；per-BMC 浪潮 ~152.4 / 155.9 / 150.9s 为现场 /metrics 观测值，无落盘 artifact——留存 `state-20260824-170149.txt` 仅含快组轮采样 43.3151364） | 不变 |
+| mock 全量轮 / 编码 | — | 0.33ms / 0.06ms（中位数，perf_test 复测） | 新基准 |
 | 内存（工作集 / 私有） | 44.3MB / 31.5MB | 44.9MB / 31.7MB（state artifact 采样） | +0.6 / +0.2MB（测量噪声内；预编码副本 ~2.3MB 理论成本未显著显现） |
 
 - 方法注与 artifact（测量输出落盘于 `%TEMP%\opencode\redfish-perf-run\`）：acceptance §3 的 ~310ms 基线未保留测量方法，本记录 after 给出两种客户端：
   - curl.exe（每次新建连接、无客户端解析）：p50 **2.4ms**（`curl-hot-20260824-170145.txt`）/ **10.7ms**（`curl-hot-20260824-170215.txt`），单请求 1.6–55.9ms——残余时间归因于回环 TCP 建连与 1.16MB 响应体传输（每请求新连接、无 keep-alive），不含任何现场编码（预编码字节直接拼接）；p50 随并发采集轮活动波动（快照交换瞬时独占写锁 + BMC 采集占 CPU），故按两次独立运行给出区间，不对服务器侧改善倍数做单点断言。
   - PowerShell `Invoke-WebRequest`：p50 **498.8ms**（`iwr-hot-20260824-170030.txt`，bytes=1150980）——每请求含 ~490ms 客户端/代理探测与解析开销，数字由客户端主导，与服务器侧无关。
-  - 受控编码成本对比由 mock 基准（hot_path_ms_med 0.0005 / encode_ms_med 0.07，Task 3）覆盖。
+  - 受控编码成本对比由 mock 基准（hot_path_ms_min/med/max 0.0003/0.0005/0.0028，encode_ms_med 0.06，final 修复后复测；Task 3 初测见其报告）覆盖。
 - 输出字节 1.16MB vs 1.1MB 为数据增长（Dell 事件日志新增条目；`state-20260824-170149.txt`：series=9765 vs 9745、bytes=1160847），非代码差异；字节等价由 `tests/http_test.rs` 钉死。
 - 运行期间浪潮出现一次单资源瞬时失败（failed=1，该轮按设计发布 up=0）→ 按稳定性设计降级 SessionDegraded → basic 兜底下一轮 failed=0 恢复 up=1；全程 errors_total=0 无累计。真机会话为 Windows 强杀结束，未走优雅清理（平台限制，验收报告 §2 已记录）。
 
@@ -60,3 +60,4 @@
 
 - N×walk 共享预取与 per-BMC 并发（D1 排除，backlog）
 - gzip/流式输出（backlog）
+- 稳定性跟进：真机测量期间一次 exporter ~12 分钟无日志后静默退出（未复现、无 panic 痕迹），需专项排查（backlog）
