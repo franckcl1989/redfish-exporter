@@ -9,6 +9,7 @@ pub mod metrics;
 pub mod pagination;
 pub mod registry;
 pub mod scraper;
+pub mod stability;
 
 /// 恢复被 panic 污染的锁守卫：中毒说明曾有任务在持锁时 panic，
 /// 恢复后继续服务（避免连锁 panic），同时记录 error 日志留痕。

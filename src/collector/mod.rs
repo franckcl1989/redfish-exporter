@@ -67,7 +67,7 @@ pub(crate) fn push_info(out: &mut Vec<Metric>, bmc: &str, key: &str, value: &str
     );
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ScrapeReport {
     pub metrics: Vec<Metric>,
     pub failed_resources: Vec<String>,
