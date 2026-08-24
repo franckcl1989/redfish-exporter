@@ -17,7 +17,6 @@ use tracing::info;
 
 use crate::auth::bearer_authorized;
 use crate::config::{Config, SecretString, load_config};
-use crate::metrics::encode;
 use crate::registry::Snapshot;
 
 const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -86,11 +85,12 @@ async fn metrics_handler(State(state): State<AppState>) -> Response {
         );
         return (StatusCode::OK, headers, "").into_response();
     }
-    // TextEncoder 输出以换行结尾，各 BMC 快照直接拼接；
-    // registries() 按 BMC 名排序，保证输出确定性。
-    let mut body = String::new();
-    for (_, registry) in state.snapshot.registries() {
-        body.push_str(&encode(&registry));
+    // 预编码字节直接拼接（发布时已编码）；registries() 按 BMC 名排序，输出确定性不变。
+    let entries = state.snapshot.registries();
+    let total: usize = entries.iter().map(|(_, e)| e.encoded.len()).sum();
+    let mut body: Vec<u8> = Vec::with_capacity(total);
+    for (_, entry) in &entries {
+        body.extend_from_slice(&entry.encoded);
     }
     (
         StatusCode::OK,

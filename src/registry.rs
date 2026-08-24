@@ -3,17 +3,26 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::collector::ScrapeReport;
 use crate::metrics::{
-    BUILD_INFO, Metric, MetricsError, SCRAPE_ERROR, SCRAPE_ERRORS_TOTAL, UP, register_into,
+    BUILD_INFO, Metric, MetricsError, SCRAPE_ERROR, SCRAPE_ERRORS_TOTAL, UP, encode_bytes_into,
+    register_into,
 };
 use crate::recover_lock;
+
+/// 快照条目：registry 与发布时编码一次的文本（/metrics 直接拼接，零现场编码）。
+pub struct RegistryEntry {
+    pub registry: Arc<prometheus::Registry>,
+    pub encoded: Vec<u8>,
+}
 
 /// 指标快照：RwLock 内为每个 BMC 各存一个 Arc 指针，update 按 BMC 名
 /// 插入/替换，读取不克隆底层 registry。errors 记录跨轮累计的失败资源数，
 /// 每轮 build_registry 时把当前累计值烧进新 registry（registry 本身每轮重建，
 /// 计数必须存在快照层）。
 pub struct Snapshot {
-    inner: RwLock<HashMap<String, Arc<prometheus::Registry>>>,
+    inner: RwLock<HashMap<String, Arc<RegistryEntry>>>,
     errors: Mutex<HashMap<String, u64>>,
+    /// 编码复用缓冲：跨轮增长一次后不再反复扩容（每轮 encode 写入后克隆入条目）。
+    scratch: Mutex<Vec<u8>>,
 }
 
 impl Default for Snapshot {
@@ -27,6 +36,7 @@ impl Snapshot {
         Snapshot {
             inner: RwLock::new(HashMap::new()),
             errors: Mutex::new(HashMap::new()),
+            scratch: Mutex::new(Vec::new()),
         }
     }
 
@@ -45,14 +55,24 @@ impl Snapshot {
             .unwrap_or(0)
     }
 
-    /// 插入或替换指定 BMC 的快照 registry（原子，按 BMC 隔离）。
+    /// 插入或替换指定 BMC 的快照（原子，按 BMC 隔离）。发布时编码一次存入条目，
+    /// /metrics 直接拼接预编码字节（编码成本移出请求路径）。
     pub fn update(&self, bmc_name: &str, registry: Arc<prometheus::Registry>) {
-        recover_lock(self.inner.write()).insert(bmc_name.to_string(), registry);
+        let mut scratch = recover_lock(self.scratch.lock());
+        scratch.clear();
+        encode_bytes_into(&registry, &mut scratch);
+        let entry = Arc::new(RegistryEntry {
+            registry,
+            encoded: scratch.clone(),
+        });
+        recover_lock(self.inner.write()).insert(bmc_name.to_string(), entry);
     }
 
     /// 读取指定 BMC 的快照；该 BMC 从未采集过时为 None。
     pub fn registry(&self, bmc_name: &str) -> Option<Arc<prometheus::Registry>> {
-        recover_lock(self.inner.read()).get(bmc_name).cloned()
+        recover_lock(self.inner.read())
+            .get(bmc_name)
+            .map(|e| Arc::clone(&e.registry))
     }
 
     /// 没有任何 BMC 的快照时返回 true（/metrics 据此返回 no-data-yet）。
@@ -60,11 +80,11 @@ impl Snapshot {
         recover_lock(self.inner.read()).is_empty()
     }
 
-    /// 所有 BMC 的 (name, registry) 快照对，按 BMC 名排序保证输出确定性。
-    pub fn registries(&self) -> Vec<(String, Arc<prometheus::Registry>)> {
+    /// 所有 BMC 的 (name, entry) 快照对，按 BMC 名排序保证输出确定性。
+    pub fn registries(&self) -> Vec<(String, Arc<RegistryEntry>)> {
         let mut pairs: Vec<_> = recover_lock(self.inner.read())
             .iter()
-            .map(|(name, reg)| (name.clone(), Arc::clone(reg)))
+            .map(|(name, entry)| (name.clone(), Arc::clone(entry)))
             .collect();
         pairs.sort_by(|a, b| a.0.cmp(&b.0));
         pairs

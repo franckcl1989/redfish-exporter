@@ -183,14 +183,24 @@ pub fn register_into(
     Ok(())
 }
 
-pub fn encode(registry: &prometheus::Registry) -> String {
-    use prometheus::TextEncoder;
-    let mut buf = String::new();
-    // 不变量：encode_utf8 写入 String 不会失败；失败即程序缺陷，panic 合理。
-    TextEncoder::new()
-        .encode_utf8(&registry.gather(), &mut buf)
-        .expect("TextEncoder::encode_utf8 writes to String and cannot fail");
+/// 编码 registry 为 Prometheus 文本格式字节（快照预编码缓存使用）。
+pub fn encode_bytes(registry: &prometheus::Registry) -> Vec<u8> {
+    let mut buf = Vec::new();
+    encode_bytes_into(registry, &mut buf);
     buf
+}
+
+/// 编码写入调用方缓冲（可复用：clear 后重复调用避免反复增长分配）。
+pub fn encode_bytes_into(registry: &prometheus::Registry, out: &mut Vec<u8>) {
+    use prometheus::{Encoder, TextEncoder};
+    // 不变量：encode 写入 Vec<u8> 不会失败；失败即程序缺陷，panic 合理。
+    TextEncoder::new()
+        .encode(&registry.gather(), out)
+        .expect("TextEncoder::encode writes to Vec<u8> and cannot fail");
+}
+
+pub fn encode(registry: &prometheus::Registry) -> String {
+    String::from_utf8(encode_bytes(registry)).expect("TextEncoder output is always valid UTF-8")
 }
 
 pub fn unbox_reading(v: Option<Option<f64>>) -> Option<f64> {

@@ -112,6 +112,36 @@ async fn body_text(resp: Response) -> String {
     .unwrap()
 }
 
+/// 语义冻结守护：快照存储的预编码字节与现场编码逐字节一致。
+#[tokio::test]
+async fn snapshot_encoded_bytes_equal_live_encode() {
+    let snap = Arc::new(Snapshot::new());
+    let reg = redfish_exporter::registry::build_registry(
+        "bmc1",
+        &redfish_exporter::collector::ScrapeReport {
+            metrics: vec![
+                Metric::gauge("redfish_up", "up")
+                    .label("bmc", "bmc1".into())
+                    .build(1.0),
+                Metric::gauge("redfish_scrape_error", "err")
+                    .label("bmc", "bmc1".into())
+                    .label("resource", "cooldown".into())
+                    .build(1.0),
+            ],
+            failed_resources: vec![],
+        },
+        7,
+    )
+    .await
+    .unwrap();
+    let live = redfish_exporter::metrics::encode(&reg).into_bytes();
+    snap.update("bmc1", reg.clone());
+    let entries = snap.registries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].1.encoded, live);
+    assert!(Arc::ptr_eq(&entries[0].1.registry, &reg));
+}
+
 #[tokio::test]
 async fn metrics_endpoint_returns_cached_snapshot() {
     let snap = Arc::new(Snapshot::new());
