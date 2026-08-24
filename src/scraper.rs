@@ -140,7 +140,10 @@ impl Scraper {
                 (RoundAction::SessionRetry, _) => (true, false),
                 (RoundAction::Scrape, BmcState::SessionDegraded { .. }) => (false, true),
                 (RoundAction::Scrape, _) => (true, false),
-                (RoundAction::CooldownWait, _) => unreachable!(),
+                // 死分支：CooldownWait 已在上方 matches! 处 continue，不可到达；
+                // 兜底取与 Healthy 轮同构的 (attempt_session, use_basic_only)，
+                // 任何未来重构都不至在此 panic。
+                (RoundAction::CooldownWait, _) => (true, false),
             };
             let handle = handle.clone();
             let slow_state = Arc::clone(&slow_state);
@@ -346,6 +349,8 @@ pub async fn run_bmc_round(
     // 反复打 session 端点（spec §4.1）；SessionRetry 轮重挂失败的兜底成功轮据此留在
     // SessionDegraded（不误升 Healthy）；basic 采集成功的轮走 ok 分支优先，保持 Healthy、
     // up=1 可达、不进降级。
+    // 注：会话重建重试仅在降级态的失败轮按退避节奏推进（下一重试时刻随失败递增）；
+    // basic 采集成功的健康轮按 ok 分支优先保持 Healthy，不启动退避节奏（spec §4.1 冻结语义）。
     let mut session_recovery_failed = false;
     if auth == AuthMethod::Session && attempt_session && !session_established.load(Ordering::SeqCst)
     {

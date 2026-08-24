@@ -78,8 +78,8 @@ Fast group (every round): sensors, power, processors, memory, system/chassis/man
 Per-BMC state machine (`src/stability.rs`, wired in `src/scraper.rs`):
 
 - **Healthy** — normal collection; consecutive failed rounds (round error OR any `failed_resources`, i.e. `up=0` rounds) are counted.
-- **Cooling** — after `stability.cooldown_failures` consecutive failures the BMC is fully skipped (no requests); an `up=0` snapshot with `redfish_scrape_error{resource="cooldown"}` is published each round without incrementing `redfish_scrape_errors_total`. Retries follow exponential backoff `min(cooldown_max, cooldown_base × 2^n)`; success resets to Healthy.
-- **SessionDegraded** (session-auth BMCs only) — entered when a 401 re-login fails: basic credentials take over collection each round (up=1 achievable, marked with `redfish_scrape_error{resource="session-degraded"}=1`), while session re-establishment retries on the same backoff schedule; success returns to Healthy; consecutive basic failures also lead to Cooling.
+- **Cooling** — after `stability.cooldown_failures` consecutive failures the BMC is fully skipped (no requests); an `up=0` snapshot with `redfish_scrape_error{resource="cooldown"}` is published each round without incrementing `redfish_scrape_errors_total`. Retries follow exponential backoff `min(cooldown_max, cooldown_base × 2^(failures-1))` — first backoff base (60s), doubling per consecutive failure, capped at max: 60s/120s/240s/300s; success resets to Healthy.
+- **SessionDegraded** (session-auth BMCs only) — entered when a 401 re-login fails or session establishment fails: basic credentials take over collection each round (up=1 achievable, marked with `redfish_scrape_error{resource="session-degraded"}=1`), while session re-establishment retries on the same backoff schedule (advancing only while rounds fail); success returns to Healthy; consecutive basic failures also lead to Cooling.
 
 Config (frozen semantics for 0.1.0):
 

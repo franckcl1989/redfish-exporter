@@ -94,6 +94,10 @@ pub fn on_round_result(
             if ok {
                 BmcState::Healthy { failures: 0 }
             } else if outcome.session_recovery_failed {
+                // 不变量（run_bmc_round 的守卫保证）：session_recovery_failed ⇒
+                // attempted_session——该标志仅在 attempt_session=true 的轮内
+                // （轮首建会话失败 / 401 重登失败）置位。
+                debug_assert!(outcome.attempted_session);
                 BmcState::SessionDegraded {
                     basic_failures: 0,
                     session_failures: 1,

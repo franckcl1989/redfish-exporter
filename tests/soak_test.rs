@@ -21,10 +21,12 @@ async fn soak_healthy_mock_bmc() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(14400);
     let interval = Duration::from_secs(1);
-    let deadline = Instant::now() + Duration::from_secs(secs);
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(secs);
     let mut samples: Vec<(f64, f64, f64, usize)> = Vec::new(); // (elapsed_s, round_ms, rss_mb, bytes)
     let mut sys = sysinfo::System::new();
     let pid = sysinfo::Pid::from_u32(std::process::id());
+    let mut lookup_failed = false;
 
     while Instant::now() < deadline {
         let bmc = Arc::new(MockBmc::default());
@@ -71,20 +73,19 @@ async fn soak_healthy_mock_bmc() {
         let registry = build_registry("soak", &report, 0).await.unwrap();
         let out = redfish_exporter::metrics::encode(&registry);
         let round_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        sys.refresh_process(pid);
-        let rss_mb = sys
-            .process(pid)
-            .map(|p| p.memory() as f64 / 1024.0 / 1024.0)
-            .unwrap_or(0.0);
-        samples.push((
-            deadline.elapsed().as_secs_f64().abs(),
-            round_ms,
-            rss_mb,
-            out.len(),
-        ));
+        let rss_mb = match (sys.refresh_process(pid), sys.process(pid)) {
+            (true, Some(p)) => p.memory() as f64 / 1024.0 / 1024.0,
+            // RSS 采样失败不静默记 0：标记后由结尾断言统一判红。
+            _ => {
+                lookup_failed = true;
+                0.0
+            }
+        };
+        samples.push((start.elapsed().as_secs_f64(), round_ms, rss_mb, out.len()));
         tokio::time::sleep(interval).await;
     }
 
+    assert!(!lookup_failed, "RSS sampling failed during soak");
     assert!(
         samples.len() >= 10,
         "soak too short: {} rounds",

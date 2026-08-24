@@ -1,9 +1,12 @@
 use axum::{Router, routing::get};
+use nv_redfish::ServiceRoot;
+use nv_redfish_bmc_mock::{Bmc as MockBmc, Expect};
 use redfish_exporter::bmc::{BmcHandle, build_http_client, make_bmc};
 use redfish_exporter::config::{AuthMethod, BmcConfig, SecretString, StabilityConfig};
 use redfish_exporter::stability::{
     BmcState, RoundAction, RoundOutcome, next_backoff, on_round_result, round_action,
 };
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -244,19 +247,29 @@ fn spawn_server(status: axum::http::StatusCode) -> (String, tokio::task::JoinHan
     (format!("http://{addr}"), handle)
 }
 
-/// 以 Session 认证构建 BmcHandle（不建会话——建立/重登由 run_bmc_round 轮内驱动）。
-fn session_handle(host: &str) -> BmcHandle {
+/// 以指定认证方式构建 BmcHandle（不建会话——建立/重登由 run_bmc_round 轮内驱动）。
+fn auth_handle(host: &str, auth: AuthMethod) -> BmcHandle {
     let cfg = BmcConfig {
         name: "inj".into(),
         host: Url::parse(host).unwrap(),
         username: "admin".into(),
         password: SecretString::new("pw".into()),
-        auth: AuthMethod::Session,
+        auth,
         insecure_skip_verify: false,
         ca_cert_file: None,
     };
     let client = build_http_client(&cfg, Duration::from_secs(5)).unwrap();
     make_bmc(&cfg, client)
+}
+
+/// Session 认证的 BmcHandle。
+fn session_handle(host: &str) -> BmcHandle {
+    auth_handle(host, AuthMethod::Session)
+}
+
+/// Basic 认证的 BmcHandle。
+fn basic_handle(host: &str) -> BmcHandle {
+    auth_handle(host, AuthMethod::Basic)
 }
 
 /// 401-only 服务器：首轮 Healthy 尝试 session → 401 → 重登失败（session_recovery_failed）→
@@ -303,9 +316,10 @@ async fn fault_injection_401_only_server_degrades_then_cools() {
     assert!(matches!(state, BmcState::Cooling { .. }));
 }
 
-/// 会话 token 被拒（真实 401）而 basic 放行的服务器：带 Authorization: Basic 的
-/// /redfish/v1 返回 200 最小服务根（无任何导航链接），其余请求一律 401。
-/// 状态流：token 401 → 重登失败（session_recovery_failed）→ Healthy 降级 SessionDegraded
+/// 会话 token 被拒（真实 401）而 basic 仅对服务根放行的服务器：带 Authorization: Basic 的
+/// /redfish/v1 返回 200 最小服务根，其余请求（含 SessionService/Sessions 端点）一律 401。
+/// 状态流：token 401 → 重登失败（服务根 basic GET 成功，但 SessionService/Sessions
+/// 端点返回 401，重登走不通）→ session_recovery_failed → Healthy 降级 SessionDegraded
 /// → basic 兜底轮成功（up=1、failed_resources 为空）→ 仍处 SessionDegraded 并带
 /// session-degraded 标记。
 #[tokio::test]
@@ -364,7 +378,8 @@ async fn fault_injection_session_401_basic_ok_degrades_with_mark() {
     let slow_state = Arc::new(Mutex::new(HashMap::new()));
     let sessions = Arc::new(Mutex::new(HashMap::new()));
     let cfg = cfg();
-    // 第 1 轮：token 401 → 重登（basic 凭据建会话）→ 服务根无 SessionService 链接 → 重登失败
+    // 第 1 轮：token 401 → 重登（basic 凭据建会话）→ 服务根 basic GET 成功但
+    // SessionService/Sessions 端点返回 401 → 重登失败
     let o = redfish_exporter::scraper::run_bmc_round(
         &handle,
         None,
@@ -415,4 +430,79 @@ async fn fault_injection_session_401_basic_ok_degrades_with_mark() {
             .iter()
             .any(|m| m.name == "redfish_scrape_error")
     );
+}
+
+/// 乱码响应（spec §5.1「错误/乱码响应」行）：MockBmc 期望队列注入形状错误的
+/// 服务根 JSON（合法 JSON、非 ServiceRoot 形状）→ ServiceRoot::new 解析失败
+/// （BadResponseJson）→ 轮失败 → 连续 3 轮 → Cooling。
+/// MockBmc 无法驱动 HttpBmc 专用的 run_bmc_round，故轮失败结果按 run_bmc_round
+/// 非 401/404 错误臂的产出同构构造（report=None、session_recovery_failed=false、
+/// attempted_session=true），状态机推进为真实代码。
+#[tokio::test]
+async fn fault_injection_garbled_root_mock_reaches_cooldown() {
+    let bmc = Arc::new(MockBmc::<serde_json::Error>::default());
+    bmc.expect(Expect::get(
+        nv_redfish::core::ODataId::service_root(),
+        json!({ "Id": 12345 }),
+    ));
+    let err = match ServiceRoot::new(Arc::clone(&bmc)).await {
+        Err(e) => e,
+        Ok(_) => panic!("wrong-shape root must fail deserialization"),
+    };
+    assert!(format!("{err}").contains("json"), "unexpected error: {err}");
+    let outcome = RoundOutcome {
+        report: None,
+        message: err.to_string(),
+        session_recovery_failed: false,
+        attempted_session: true,
+    };
+    let cfg = cfg();
+    let now = Instant::now();
+    let mut state = BmcState::Healthy { failures: 0 };
+    for _ in 0..3 {
+        state = on_round_result(&state, &outcome, true, &cfg, now);
+    }
+    assert!(matches!(state, BmcState::Cooling { .. }));
+}
+
+/// 乱码响应端到端（真实 HTTP，spec §5.1 同一行）：服务器对一切请求返回 200 +
+/// 合法 JSON 但非 ServiceRoot 形状（数组）→ HttpBmc 解析失败（JsonError，非
+/// 401/404）→ run_bmc_round 轮失败（report=None）→ 连续 3 轮 → Cooling。
+/// 与 MockBmc 注入测试互为补充：本测试走 ServiceRoot → collect_round →
+/// run_bmc_round → 状态机完整真实链路。
+#[tokio::test]
+async fn fault_injection_garbled_response_round_fails_then_cools() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new().fallback(|| async { (axum::http::StatusCode::OK, "[]") });
+    // Windows：非阻塞 listener 要求，见 spawn_server 注释。
+    listener.set_nonblocking(true).unwrap();
+    let _server = tokio::spawn(async move {
+        axum_server::from_tcp(listener)
+            .unwrap()
+            .serve(app.into_make_service())
+            .await
+            .unwrap();
+    });
+    let handle = basic_handle(&format!("http://{addr}"));
+    let slow_state = Arc::new(Mutex::new(HashMap::new()));
+    let sessions = Arc::new(Mutex::new(HashMap::new()));
+    let cfg = cfg();
+    let mut state = BmcState::Healthy { failures: 0 };
+    for _ in 0..3 {
+        let o = redfish_exporter::scraper::run_bmc_round(
+            &handle,
+            None,
+            &slow_state,
+            &sessions,
+            Duration::from_secs(5),
+            true,
+            false,
+        )
+        .await;
+        assert!(o.report.is_none(), "garbled round must fail: {}", o.message);
+        assert!(!o.session_recovery_failed);
+        state = on_round_result(&state, &o, true, &cfg, Instant::now());
+    }
+    assert!(matches!(state, BmcState::Cooling { .. }));
 }

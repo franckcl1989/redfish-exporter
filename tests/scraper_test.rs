@@ -225,3 +225,37 @@ fn degraded_mark_appends_scrape_error_series() {
             .any(|(k, v)| *k == "resource" && v == "session-degraded")
     );
 }
+
+/// 冷却发布语义（spec §4.3 冻结契约，端到端）：cooldown_report → build_registry → encode。
+/// 显式传入 errors_total 并断言输出原样保留——证明冷却轮不累计 scrape_errors_total。
+#[tokio::test]
+async fn cooldown_publish_semantics_pin_frozen_contract() {
+    let error_total = 7;
+    let reg = build_registry("x", &cooldown_report(), error_total)
+        .await
+        .unwrap();
+    let out = encode(&reg);
+    assert!(out.contains("redfish_up{bmc=\"x\"} 0"), "output: {out}");
+    assert!(
+        out.contains("redfish_scrape_error{bmc=\"x\",resource=\"cooldown\"} 1"),
+        "output: {out}"
+    );
+    assert!(
+        out.contains("redfish_scrape_errors_total{bmc=\"x\"} 7"),
+        "cooldown must not increment errors_total, output: {out}"
+    );
+}
+
+/// 到期重试失败轮按正常失败计数（spec §4.3「Cooling（到期重试失败）」行）：
+/// record_scrape_errors 正常路径 +1，build_registry 编码出累计值。
+#[tokio::test]
+async fn retry_failure_round_increments_errors_total() {
+    let snap = Snapshot::new();
+    snap.record_scrape_errors("x", 6);
+    snap.record_scrape_errors("x", 1);
+    let reg = build_registry("x", &cooldown_report(), snap.scrape_errors("x"))
+        .await
+        .unwrap();
+    let out = encode(&reg);
+    assert!(out.contains("redfish_scrape_errors_total{bmc=\"x\"} 7"));
+}

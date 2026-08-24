@@ -30,6 +30,8 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
   graceful-shutdown-smoke:
     runs-on: ubuntu-latest
+    # 超时护栏（spec §9）：整个 job 10 分钟上限，防止挂死进程拖垮 CI。
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -55,7 +57,12 @@ jobs:
           pid=$!
           sleep 2
           kill -TERM "$pid"
-          wait "$pid" && rc=0 || rc=$?
+          # 超时护栏（spec §9）：至多等 30s 退出（timeout 超时杀 tail，退出码 124）；
+          # 若 exporter 仍不退出，wait 挂起由 job 级 timeout-minutes 兜底判红。
+          set +e
+          timeout 30 tail --pid="$pid" -f /dev/null
+          wait "$pid"; rc=$?
+          set -e
           echo "exporter exit code: $rc"
           test "$rc" -eq 0
           grep -q "shutdown complete" /tmp/smoke.log
