@@ -1,0 +1,10 @@
+# cargo-audit 忽略清单（0.1.0 安全专项 spec §5 / 验收报告 §5）
+# RUSTSEC-2026-0194 / RUSTSEC-2026-0195：quick-xml 0.38.4 漏洞。
+# quick-xml 仅经 nv-redfish-csdl-compiler 进入构建期依赖树，不进入运行时二进制
+# （cargo tree --edges normal 无 quick-xml）。nv-redfish 0.15.1 锁定无法升级
+# （0.41 为 major bump，升级破坏依赖链约束）；跟踪 nv-redfish 上游修复后移除本清单。
+[advisories]
+ignore = [
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]

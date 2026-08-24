@@ -24,6 +24,7 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Audit dependencies
+        # 白名单见 .cargo/audit.toml（quick-xml 构建期依赖，跟踪 nv-redfish 上游）
         run: cargo audit
       - name: Deny policy checks
         uses: EmbarkStudios/cargo-deny-action@v2

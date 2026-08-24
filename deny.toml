@@ -1,0 +1,69 @@
+# cargo-deny 策略（0.1.0 安全专项 spec §5）：advisories/bans/licenses/sources 四类全开。
+[advisories]
+version = 2
+yanked = "deny"
+# 与 .cargo/audit.toml 相同的两项豁免：RUSTSEC-2026-0194/0195 为 quick-xml 0.38.4
+# 构建期依赖（仅经 nv-redfish-csdl-compiler 进入依赖树，不进入运行时二进制），
+# nv-redfish 0.15.1 锁定无法升级；跟踪 nv-redfish 上游修复后移除。
+ignore = [
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+# 依赖树若存在不可避免的同名多版本（执行 cargo deny check bans 观察输出），
+# 以 [[bans.skip]] 逐项豁免并附理由注释，禁止 wildcard 豁免。
+# 以下逐项豁免均为上游锁定的 legacy 分支，无法在不改动 Cargo.toml/Cargo.lock 的前提下合并：
+[[bans.skip]]
+# syn 2.x 仅由 nv-redfish-csdl-compiler（构建期）经 prettyplease/synstructure 等引入；
+# 运行时依赖树统一使用 syn 3.x（serde_derive/clap_derive/tokio-macros 等）。
+name = "syn"
+version = "=2.0.119"
+
+[[bans.skip]]
+# thiserror 1.x 仅由 prometheus 客户端经 protobuf 栈引入；主依赖树使用 thiserror 2.x。
+name = "thiserror"
+version = "=1.0.69"
+
+[[bans.skip]]
+# 与 thiserror 1.0.69 配套的 proc-macro，同源同理由。
+name = "thiserror-impl"
+version = "=1.0.69"
+
+[[bans.skip]]
+# toml 0.9 仅由 nv-redfish-csdl-compiler（构建期）使用；运行时使用 toml_edit 1.x 栈。
+name = "toml_datetime"
+version = "=0.7.5"
+
+[[bans.skip]]
+# windows-sys 0.52 仅由 ring 0.17（rustls 栈）引入；主依赖树使用 0.61.x。
+name = "windows-sys"
+version = "=0.52.0"
+
+[[bans.skip]]
+# winnow 0.7 仅由 nv-redfish-csdl-compiler 的 toml 0.9（构建期）使用；toml_edit 栈使用 winnow 1.x。
+name = "winnow"
+version = "=0.7.15"
+
+[licenses]
+version = 2
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "ISC",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "Zlib",
+  "Unicode-3.0",
+  "MPL-2.0",
+  "OpenSSL",
+]
+# 说明：MPL-2.0（webpki-roots）与 OpenSSL（ring 许可证表达式组成部分）为 rustls 栈既有依赖。
+# 若 cargo deny check licenses 报出清单外许可证，仅可添加 OSI/FSF 批准的许可证并附理由，禁止 "*"。
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
