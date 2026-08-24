@@ -63,6 +63,13 @@ allow = [
 # 说明：MPL-2.0（webpki-roots）与 OpenSSL（ring 许可证表达式组成部分）为 rustls 栈既有依赖。
 # 若 cargo deny check licenses 报出清单外许可证，仅可添加 OSI/FSF 批准的许可证并附理由，禁止 "*"。
 
+# CDLA-Permissive-2.0 是 webpki-roots 1.x 根证书数据包的许可证（数据许可，rustls 维护者有意选择，
+# Rust TLS 生态标准组成）；全局 allowlist 保持仅 OSI/FSF 批准许可证（CDLA 不加入全局清单），
+# 仅对本 crate 例外。
+[[licenses.exceptions]]
+name = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
