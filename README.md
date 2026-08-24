@@ -24,6 +24,8 @@ Endpoints:
 | `/discover` | Prometheus HTTP SD target list of all BMC hosts as JSON   |
 | `/reload`   | Reload and validate the config file from disk (`POST`; `400` on invalid config, old config kept; BMC add/remove or credential changes still need a restart) |
 
+Note: `listen_addr` defaults to `127.0.0.1:9417` — remote scraping requires an explicit `0.0.0.0` bind (see Security).
+
 CLI options: `-c/--config <path>` (default `config.yaml`), `-p/--port <port>` (overrides `listen_addr` port), `--log-level <level>` (default `info`; `RUST_LOG` takes precedence).
 
 ## Configuration
@@ -32,16 +34,17 @@ See [`config.example.yaml`](config.example.yaml). All durations use `humantime` 
 
 | Key                      | Default       | Description                                                      |
 |--------------------------|---------------|------------------------------------------------------------------|
-| `listen_addr`            | `0.0.0.0:9417`| HTTP listen address for `/metrics` and `/healthz`               |
+| `listen_addr`            | `127.0.0.1:9417`| HTTP listen address; defaults to 127.0.0.1 for safe-by-default, set 0.0.0.0 explicitly for remote Prometheus |
 | `scrape_interval`        | `30s`         | Interval between scrape rounds                                   |
 | `scrape_timeout`         | `15s`         | Deadline for one scrape round; tasks are aborted when exceeded   |
 | `slow_interval`          | `null`        | Interval for slow-group collectors (storage, network, firmware, assembly, event logs, BIOS); `null` = collect every round |
 | `request_timeout`        | `10s`         | Per-request HTTP timeout, applied to every BMC request       |
+| `web`                    | `null`        | Inbound hardening: auth_token (>=16 chars), auth_token_file (mutually exclusive), tls_cert_file + tls_key_file (must be set together) |
 | `bmcs`                   | required      | Non-empty list of BMC entries                                    |
 | `bmcs[].name`            | required      | Unique name, used as the `bmc` metric label                      |
 | `bmcs[].host`            | required      | BMC base URL, scheme `http` or `https`                           |
 | `bmcs[].username`        | required      | Redfish account name                                             |
-| `bmcs[].password`        | required      | Account password (never logged; `Debug` output is `[REDACTED]`)  |
+| `bmcs[].password`        | required      | Account password (never logged; `Debug` output is `[REDACTED]`); can be overridden by env var REDFISH_EXPORTER_PASSWORD_<NAME> (name uppercased, non-alphanumerics replaced by _) |
 | `bmcs[].auth`            | `basic`       | `basic` or `session` (session authentication establishes an `X-Auth-Token` automatically) |
 | `bmcs[].insecure_skip_verify` | `false`  | **Dangerous**: disables TLS certificate verification             |
 | `bmcs[].ca_cert_file`    | `null`        | Path to a PEM CA bundle for self-signed BMC certificates         |
@@ -80,10 +83,10 @@ Example Prometheus alert rules are provided in [`deploy/prometheus/redfish-alert
 
 ## Security
 
-- **Secret redaction**: passwords are stored in a `SecretString` type whose `Debug` representation is `[REDACTED]`; they are never logged.
-- **TLS**: TLS is provided by `rustls` — no OpenSSL dependency. Custom CA bundles via `ca_cert_file`.
-- **`insecure_skip_verify`**: only for self-signed BMC certificates. It disables certificate verification entirely (including hostname checks); prefer `ca_cert_file` whenever possible.
-- **Non-root containers**: the Kubernetes examples run as `runAsUser: 65532` with a read-only root filesystem.
+- **Inbound hardening (optional, per docs/security.md)**: bearer-token auth on all endpoints (constant-time compare, `web.auth_token` / `web.auth_token_file`, >= 16 chars) and server-side TLS via rustls (`web.tls_cert_file` + `web.tls_key_file`). `listen_addr` defaults to `127.0.0.1:9417` — remote scraping requires an explicit `0.0.0.0` bind plus auth/TLS per the baseline matrix.
+- **Secret redaction**: passwords are stored in a `SecretString` type whose `Debug` representation is `[REDACTED]` and whose buffer is zeroized on drop; they are never logged. Passwords can be injected via environment variables instead of the config file.
+- **TLS**: rustls — no OpenSSL dependency. Custom CA bundles via `ca_cert_file`. https->http redirect downgrades are blocked; `insecure_skip_verify` is per-BMC opt-in for self-signed BMC certificates only — prefer `ca_cert_file`.
+- **Supply chain**: `#![forbid(unsafe_code)]`, cargo-deny policy (`deny.toml`), cargo-audit allowlist with rationale (`.cargo/audit.toml`), non-root distroless container with read-only root filesystem.
 
 ## Development
 

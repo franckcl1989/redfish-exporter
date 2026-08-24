@@ -26,6 +26,7 @@ metadata:
     app: redfish-exporter
 data:
   config.yaml: |
+    # default is 127.0.0.1; 0.0.0.0 is required here so Prometheus can reach the pod — add web.auth_token/tls when the cluster is not a trusted network (docs/security.md)
     listen_addr: "0.0.0.0:9417"
     scrape_interval: "30s"
     scrape_timeout: "15s"

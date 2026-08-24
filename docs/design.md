@@ -97,6 +97,13 @@ If the scraper task panics/aborts unexpectedly, main logs the JoinError and exit
 - `basic`: `BmcCredentials::username_password` is baked into the `HttpBmc`; every request carries HTTP Basic credentials.
 - `session`: at startup, `bmc.rs::establish_session` (generic over `B: nv_redfish::Bmc`, so the flow is testable with the mock BMC) walks `ServiceRoot -> SessionService -> Sessions`, POSTs a `SessionCreate`, extracts `X-Auth-Token`, and the caller applies it via `HttpBmc::set_credentials(BmcCredentials::token(...))`. All subsequent requests use the token. If establishment fails at startup the BMC **falls back to basic auth** (warn, no abort — fixes AUDIT-2) and retries session establishment on the first round. On a `401` during a round (`bmc.rs::is_unauthorized` matches `BmcError::InvalidResponse { status: 401, .. }`), the scraper re-establishes the session once (same flow as startup) and retries the round once; if re-establishment or the retry fails, the round is treated as failed (`redfish_up=0`). Established sessions are **deleted on shutdown** (`Session::delete`, scraper stop branch, Task 13) so no server-side sessions leak; the old session of a 401 re-login is already expired and not deleted. Credentials are never logged — re-auth log lines carry only the BMC name and error. Basic-auth BMCs never re-login (Basic has no session to refresh).
 
+## Inbound security
+
+- Optional bearer-token auth: when `web.auth_token`/`auth_token_file` is set, an axum middleware (`from_fn_with_state`) requires `Authorization: Bearer <token>` on every endpoint (incl. `/healthz` and `/reload`); comparison is constant-time (XOR fold, `src/auth.rs`); 401 carries `WWW-Authenticate: Bearer`. Token changes require a restart (consistent with the reload semantics).
+- Optional server TLS: `serve()` loads a rustls config from `web.tls_cert_file`/`tls_key_file` (fail-fast on error) and serves via axum-server 0.8 (rustls); a 10s HTTP/1.1 header read timeout applies in both modes. The server is fixed to HTTP/1.1 only (`http1_only()` in both branches, ALPN restricted to `http/1.1`): the axum-server version-sniffing path (first 24 bytes to detect an h2 preface) has no deadline, so h2 was removed to make the timeout cover zero-byte idle connections (slowloris). Prometheus speaks HTTP/1.1 — no operational impact. Outbound requests carry a custom redirect policy blocking https->http downgrades (10-hop limit).
+- Implementation note (Windows): `serve_on` sets the listener nonblocking before serving — blocking std listeners hang all accepted-connection I/O under IOCP.
+- Pagination defense caps: 64MiB per page (post-deserialization check; nv typed fetch has no streaming API), 1000 pages, 200k accumulated members — violations fail the affected log service (resource-level isolation).
+
 ## Config validation rules
 
 From `config.rs` (`load_config`), applied in order:
@@ -108,9 +115,10 @@ From `config.rs` (`load_config`), applied in order:
 5. `listen_addr` must parse as a `SocketAddr`.
 6. `scrape_interval`, `scrape_timeout`, `request_timeout` must be non-zero (durations via `humantime`, e.g. `30s`).
 7. `slow_interval`, if set, must be non-zero.
-8. Defaults: `listen_addr=0.0.0.0:9417`, `scrape_interval=30s`, `scrape_timeout=15s`, `request_timeout=10s`, `slow_interval=null` (no frequency splitting), `auth=basic`, `insecure_skip_verify=false`, `ca_cert_file=null`.
-
-Client-level HTTP: request timeout from `request_timeout` config (default 10 s), 5 s connect timeout, user agent `nv-redfish/v1`; `ca_cert_file` adds a root certificate, `insecure_skip_verify` disables certificate verification entirely.
+8. Defaults: `listen_addr=127.0.0.1:9417`, `scrape_interval=30s`, `scrape_timeout=15s`, `request_timeout=10s`, `slow_interval=null` (no frequency splitting), `auth=basic`, `insecure_skip_verify=false`, `ca_cert_file=null`.
+9. Client-level HTTP: request timeout from `request_timeout` config (default 10 s), 5 s connect timeout, user agent `nv-redfish/v1`; `ca_cert_file` adds a root certificate, `insecure_skip_verify` disables certificate verification entirely.
+10. bmc `name` must not contain control characters; bmc `host` must not carry URL credentials (userinfo) — use `username`/`password` fields.
+11. `web` section: `auth_token` (>=16 chars) XOR `auth_token_file` (content trimmed, >=16 chars); `tls_cert_file` and `tls_key_file` must be set together; passwords may be overridden by `REDFISH_EXPORTER_PASSWORD_<NAME>` (empty env value rejected, name collisions rejected).
 
 ## Metric naming conventions
 
