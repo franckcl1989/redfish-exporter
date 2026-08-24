@@ -44,7 +44,11 @@ pub fn is_unauthorized(err: &nv_redfish::Error<HttpBmc<ReqwestClient>>) -> bool 
     )
 }
 
-/// 判定一次重定向是否放行：拒绝 https→http 降级；最多 10 跳（与 reqwest 默认一致）。
+/// 判定一次重定向是否放行：拒绝 https→http 降级；最多跟随 9 次重定向
+/// （`previous` 含初始 URL，`previous.len() >= 10` 即 10 个 URL = 初始 + 9 跳时停止，
+/// 比 reqwest 默认的 10 跳更严格）。
+/// 达到上限时返回 false（stop）：reqwest 将 3xx 响应原样返回给调用方，
+/// 而不是像默认策略那样报 "too many redirects" 错误。
 /// 独立为纯函数便于单元测试（与 scraper 的 slow_due 同法）。
 pub fn decide_redirect(previous: &[url::Url], next: &url::Url) -> bool {
     if previous.len() >= 10 {
@@ -56,7 +60,7 @@ pub fn decide_redirect(previous: &[url::Url], next: &url::Url) -> bool {
     )
 }
 
-/// 出站重定向策略：阻止 TLS 降级（https→http），其余按 10 跳上限跟随。
+/// 出站重定向策略：阻止 TLS 降级（https→http），其余最多跟随 9 跳（见 decide_redirect）。
 /// 注意：reqwest 自定义 policy 不自动限制跳数（文档明确），故跳数上限在 decide_redirect 内实现。
 pub fn no_downgrade_redirect() -> Policy {
     Policy::custom(|attempt| {

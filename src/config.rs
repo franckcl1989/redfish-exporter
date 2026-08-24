@@ -7,7 +7,7 @@ use std::{
 };
 use thiserror::Error;
 use url::Url;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Clone)]
 pub struct SecretString(String);
@@ -176,6 +176,25 @@ pub fn env_var_name(name: &str) -> String {
         .collect()
 }
 
+/// 从原始 host 字符串剥离 userinfo（`scheme://user:pass@host` → `scheme://host`），
+/// 供错误消息使用：凭据绝不允许回显到启动日志或 /reload 的 400 响应体。
+/// 仅在 authority 段（首个 `/`、`?` 或 `#` 之前）内查找 `@`，路径/查询中的 `@` 不受影响。
+fn redact_userinfo(raw: &str) -> String {
+    let host_start = raw.find("://").map_or(0, |i| i + 3);
+    let rest = &raw[host_start..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    match authority.rfind('@') {
+        Some(at) => format!(
+            "{}{}{}",
+            &raw[..host_start],
+            &authority[at + 1..],
+            &rest[authority_end..]
+        ),
+        None => raw.to_string(),
+    }
+}
+
 pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
     load_config_with_env(path, |key| std::env::var(key).ok())
 }
@@ -184,7 +203,7 @@ pub fn load_config_with_env(
     path: &Path,
     env_lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<Config, ConfigError> {
-    let raw: RawConfig = {
+    let mut raw: RawConfig = {
         let text = std::fs::read_to_string(path)?;
         serde_yaml_ng::from_str(&text)?
     };
@@ -207,18 +226,19 @@ pub fn load_config_with_env(
                 b.name
             )));
         }
-        let host = Url::parse(&b.host)
-            .map_err(|e| ConfigError::Invalid(format!("host '{}': {e}", b.host)))?;
+        let host = Url::parse(&b.host).map_err(|e| {
+            ConfigError::Invalid(format!("host '{}': {e}", redact_userinfo(&b.host)))
+        })?;
         if !matches!(host.scheme(), "http" | "https") {
             return Err(ConfigError::Invalid(format!(
                 "host '{}': scheme must be http or https",
-                b.host
+                redact_userinfo(&b.host)
             )));
         }
         if !host.username().is_empty() || host.password().is_some() {
             return Err(ConfigError::Invalid(format!(
                 "host '{}': credentials in URL are not allowed; use the username/password fields",
-                b.host
+                redact_userinfo(&b.host)
             )));
         }
         if b.password.is_empty() {
@@ -277,7 +297,7 @@ pub fn load_config_with_env(
     if raw.request_timeout.is_zero() {
         return Err(ConfigError::Invalid("request_timeout must be > 0".into()));
     }
-    let web = build_web_config(&raw.web)?;
+    let web = build_web_config(&mut raw.web)?;
     Ok(Config {
         listen_addr,
         scrape_interval: raw.scrape_interval,
@@ -290,33 +310,36 @@ pub fn load_config_with_env(
 }
 
 /// 校验并构建 web 配置节：token 长度下限、token 与 token_file 互斥、TLS 证书与密钥成对。
-fn build_web_config(raw: &RawWebConfig) -> Result<WebConfig, ConfigError> {
-    let auth_token = match (&raw.auth_token, &raw.auth_token_file) {
-        (Some(_), Some(_)) => {
+/// YAML token 与 token 文件内容等中间字符串用 Zeroizing 包裹，错误路径也不残留明文。
+fn build_web_config(raw: &mut RawWebConfig) -> Result<WebConfig, ConfigError> {
+    if raw.auth_token.is_some() && raw.auth_token_file.is_some() {
+        if let Some(mut t) = raw.auth_token.take() {
+            t.zeroize();
+        }
+        return Err(ConfigError::Invalid(
+            "web: auth_token and auth_token_file are mutually exclusive".into(),
+        ));
+    }
+    let auth_token = if let Some(t) = raw.auth_token.take() {
+        let t = Zeroizing::new(t);
+        if t.len() < 16 {
             return Err(ConfigError::Invalid(
-                "web: auth_token and auth_token_file are mutually exclusive".into(),
+                "web.auth_token must be at least 16 characters".into(),
             ));
         }
-        (Some(t), None) => {
-            if t.len() < 16 {
-                return Err(ConfigError::Invalid(
-                    "web.auth_token must be at least 16 characters".into(),
-                ));
-            }
-            Some(SecretString::new(t.clone()))
+        Some(SecretString::new((*t).clone()))
+    } else if let Some(path) = raw.auth_token_file.take() {
+        let content = Zeroizing::new(std::fs::read_to_string(&path).map_err(ConfigError::Io)?);
+        let token = Zeroizing::new(content.trim().to_string());
+        if token.len() < 16 {
+            return Err(ConfigError::Invalid(format!(
+                "web.auth_token_file '{}': token must be at least 16 characters",
+                path.display()
+            )));
         }
-        (None, Some(path)) => {
-            let content = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
-            let token = content.trim().to_string();
-            if token.len() < 16 {
-                return Err(ConfigError::Invalid(format!(
-                    "web.auth_token_file '{}': token must be at least 16 characters",
-                    path.display()
-                )));
-            }
-            Some(SecretString::new(token))
-        }
-        (None, None) => None,
+        Some(SecretString::new((*token).clone()))
+    } else {
+        None
     };
     let tls = match (&raw.tls_cert_file, &raw.tls_key_file) {
         (None, None) => (None, None),

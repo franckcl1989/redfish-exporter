@@ -1,4 +1,4 @@
-use redfish_exporter::config::{AuthMethod, ConfigError, load_config, load_config_with_env};
+use redfish_exporter::config::{AuthMethod, ConfigError, load_config_with_env};
 use std::io::Write;
 
 fn write_tmp(name: &str, content: &str) -> std::path::PathBuf {
@@ -27,7 +27,7 @@ bmcs:
     auth: session
 "#,
     );
-    let cfg = load_config(&p).unwrap();
+    let cfg = load_config_with_env(&p, |_| None).unwrap();
     assert_eq!(cfg.bmcs.len(), 1);
     assert_eq!(cfg.bmcs[0].host.host_str(), Some("10.0.0.1"));
     assert_eq!(cfg.bmcs[0].host.path(), "/");
@@ -47,7 +47,10 @@ bmcs:
   - { name: a, host: https://h2, username: u, password: "p" }
 "#,
     );
-    assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
+    assert!(matches!(
+        load_config_with_env(&p, |_| None),
+        Err(ConfigError::Invalid(_))
+    ));
 }
 
 #[test]
@@ -57,16 +60,21 @@ fn rejects_non_http_host() {
         r#"
 listen_addr: "0.0.0.0:9417"
 bmcs:
-  - { name: a, host: ftp://h1, username: u, password: "p" }
+  - { name: a, host: ftp://user:secret@h1, username: u, password: "p" }
 "#,
     );
-    assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
+    let err = load_config_with_env(&p, |_| None).unwrap_err();
+    assert!(
+        !err.to_string().contains("secret"),
+        "credentials leaked into error: {err}"
+    );
+    assert!(matches!(err, ConfigError::Invalid(_)));
 }
 
 #[test]
 fn rejects_missing_file() {
     assert!(matches!(
-        load_config(std::path::Path::new("C:\\nonexistent\\x.yaml")),
+        load_config_with_env(std::path::Path::new("C:\\nonexistent\\x.yaml"), |_| None),
         Err(ConfigError::Io(_))
     ));
 }
@@ -110,7 +118,7 @@ bmcs:
   - { name: a, host: https://h1, username: u, password: "p" }
 "#,
     );
-    let cfg = load_config(&p).unwrap();
+    let cfg = load_config_with_env(&p, |_| None).unwrap();
     assert_eq!(cfg.slow_interval, Some(std::time::Duration::from_secs(300)));
 }
 
@@ -124,7 +132,7 @@ bmcs:
   - { name: a, host: https://h1, username: u, password: "p" }
 "#,
     );
-    let cfg = load_config(&p).unwrap();
+    let cfg = load_config_with_env(&p, |_| None).unwrap();
     assert_eq!(cfg.slow_interval, None);
 }
 
@@ -139,7 +147,10 @@ bmcs:
   - { name: a, host: https://h1, username: u, password: "p" }
 "#,
     );
-    assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
+    assert!(matches!(
+        load_config_with_env(&p, |_| None),
+        Err(ConfigError::Invalid(_))
+    ));
 }
 
 #[test]
@@ -151,7 +162,27 @@ bmcs:
   - { name: a, host: https://user:secret@h1, username: u, password: "p" }
 "#,
     );
-    assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
+    let err = load_config_with_env(&p, |_| None).unwrap_err();
+    // 防回归：错误消息（启动日志与 /reload 400 响应体）不得回显 URL 中的凭据
+    assert!(
+        !err.to_string().contains("secret"),
+        "credentials leaked into error: {err}"
+    );
+    assert!(matches!(err, ConfigError::Invalid(_)));
+}
+
+#[test]
+fn parse_error_does_not_leak_userinfo() {
+    let p = write_tmp(
+        "userinfo_parse",
+        "bmcs:\n  - { name: a, host: \"https://user:secret@\", username: u, password: \"p\" }\n",
+    );
+    let err = load_config_with_env(&p, |_| None).unwrap_err();
+    assert!(
+        !err.to_string().contains("secret"),
+        "credentials leaked into error: {err}"
+    );
+    assert!(matches!(err, ConfigError::Invalid(_)));
 }
 
 #[test]
@@ -160,7 +191,10 @@ fn rejects_control_chars_in_bmc_name() {
         "ctrl_name",
         "bmcs:\n  - { name: \"a\\nb\", host: https://h1, username: u, password: \"p\" }\n",
     );
-    assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
+    assert!(matches!(
+        load_config_with_env(&p, |_| None),
+        Err(ConfigError::Invalid(_))
+    ));
 }
 
 #[test]
@@ -169,7 +203,7 @@ fn default_listen_addr_is_localhost() {
         "default_bind",
         "bmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
     );
-    let cfg = load_config(&p).unwrap();
+    let cfg = load_config_with_env(&p, |_| None).unwrap();
     assert_eq!(cfg.listen_addr, "127.0.0.1:9417".parse().unwrap());
 }
 
@@ -230,7 +264,10 @@ fn web_token_too_short_is_rejected() {
         "web_token_short",
         "web:\n  auth_token: short\nbmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
     );
-    assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
+    assert!(matches!(
+        load_config_with_env(&p, |_| None),
+        Err(ConfigError::Invalid(_))
+    ));
 }
 
 #[test]
@@ -239,7 +276,10 @@ fn web_token_and_file_are_mutually_exclusive() {
         "web_token_both",
         "web:\n  auth_token: 0123456789abcdef\n  auth_token_file: /tmp/tok\nbmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
     );
-    assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
+    assert!(matches!(
+        load_config_with_env(&p, |_| None),
+        Err(ConfigError::Invalid(_))
+    ));
 }
 
 #[test]
@@ -248,7 +288,10 @@ fn web_tls_cert_requires_key() {
         "web_tls_half",
         "web:\n  tls_cert_file: /tmp/cert.pem\nbmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
     );
-    assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
+    assert!(matches!(
+        load_config_with_env(&p, |_| None),
+        Err(ConfigError::Invalid(_))
+    ));
 }
 
 #[cfg(unix)]
@@ -259,6 +302,16 @@ fn detects_wide_open_config_permissions() {
     let p = write_tmp("perm_wide", "bmcs: []\n");
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(config_file_is_wide_open(&p));
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+    assert!(
+        config_file_is_wide_open(&p),
+        "group-readable must count as wide open"
+    );
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(
+        config_file_is_wide_open(&p),
+        "world-writable must count as wide open"
+    );
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(!config_file_is_wide_open(&p));
 }
@@ -276,9 +329,27 @@ fn web_token_file_content_is_loaded() {
             tok_path.display()
         ),
     );
-    let cfg = load_config(&p).unwrap();
+    let cfg = load_config_with_env(&p, |_| None).unwrap();
     assert_eq!(
         cfg.web.auth_token.as_ref().unwrap().expose(),
         "0123456789abcdef"
     );
+}
+
+#[test]
+fn web_token_file_missing_fails_config_load() {
+    let dir = std::env::temp_dir().join(format!("redfish-exporter-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let missing = dir.join("missing-token-file");
+    let p = write_tmp(
+        "web_token_file_missing",
+        &format!(
+            "web:\n  auth_token_file: {}\nbmcs:\n  - {{ name: a, host: https://h1, username: u, password: \"p\" }}\n",
+            missing.display()
+        ),
+    );
+    assert!(matches!(
+        load_config_with_env(&p, |_| None),
+        Err(ConfigError::Io(_))
+    ));
 }

@@ -17,8 +17,11 @@ wildcards = "deny"
 # 以 [[bans.skip]] 逐项豁免并附理由注释，禁止 wildcard 豁免。
 # 以下逐项豁免均为上游锁定的 legacy 分支，无法在不改动 Cargo.toml/Cargo.lock 的前提下合并：
 [[bans.skip]]
-# syn 2.x 仅由 nv-redfish-csdl-compiler（构建期）经 prettyplease/synstructure 等引入；
-# 运行时依赖树统一使用 syn 3.x（serde_derive/clap_derive/tokio-macros 等）。
+# syn 2.x 仅出现在 proc-macro/derive 类 crate 中，构建期与运行时依赖均有
+# （cargo tree -i syn@2.0.119 实测）：nv-redfish-csdl-compiler/prettyplease（构建期）、
+# synstructure（yoke/zerofrom 经 url/idna 的 ICU 栈）、tagged-types-derive（nv-redfish）、
+# thiserror-impl 1.0.69（prometheus 的 protobuf 栈）、tracing-attributes（tracing/axum）。
+# 其余 derive（serde_derive/clap_derive/tokio-macros/thiserror-impl 2.x/zerovec-derive 等）均用 syn 3.x。
 name = "syn"
 version = "=2.0.119"
 
@@ -57,10 +60,11 @@ allow = [
   "BSD-3-Clause",
   "Zlib",
   "Unicode-3.0",
-  "MPL-2.0",
   "OpenSSL",
 ]
-# 说明：MPL-2.0（webpki-roots）与 OpenSSL（ring 许可证表达式组成部分）为 rustls 栈既有依赖。
+# 说明：OpenSSL 为 ring 许可证表达式组成部分（rustls 栈既有依赖）；
+# BSD-2-Clause、Zlib 为历史 rustls 栈条目，当前树未使用，保留以防回归。
+# MPL-2.0 已移除：cargo deny list 确认当前依赖树无任何 crate 使用。
 # 若 cargo deny check licenses 报出清单外许可证，仅可添加 OSI/FSF 批准的许可证并附理由，禁止 "*"。
 
 # CDLA-Permissive-2.0 是 webpki-roots 1.x 根证书数据包的许可证（数据许可，rustls 维护者有意选择，

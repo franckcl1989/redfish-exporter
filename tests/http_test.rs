@@ -401,6 +401,28 @@ async fn auth_wrong_token_returns_401() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// RFC 6750：scheme 区分大小写，小写 `bearer` 必须被拒绝（401）。
+#[tokio::test]
+async fn auth_lowercase_bearer_scheme_is_rejected() {
+    let snap = Arc::new(Snapshot::new());
+    let app = test_router_with_token(
+        snap,
+        test_config(&[("bmc1", "https://10.0.0.1")]),
+        TEST_TOKEN,
+    );
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .header("authorization", format!("bearer {TEST_TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn auth_correct_token_grants_all_get_endpoints() {
     let snap = Arc::new(Snapshot::new());
@@ -566,10 +588,10 @@ async fn header_read_timeout_closes_idle_connection() {
     let n = stream.read(&mut buf);
     let elapsed = started.elapsed();
     assert!(
-        n.map(|n| n == 0).unwrap_or(true),
-        "expected connection closed by server (EOF)"
+        matches!(n, Ok(0)),
+        "expected clean EOF from server, got {n:?}"
     );
-    assert!(elapsed < Duration::from_secs(5), "timeout took {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(2), "timeout took {elapsed:?}");
     let _ = tx.send(true);
     handle.await.unwrap().unwrap();
 }
@@ -621,12 +643,13 @@ async fn tls_header_read_timeout_closes_idle_connection() {
     let started = std::time::Instant::now();
     let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await;
     let elapsed = started.elapsed();
-    assert!(elapsed < Duration::from_secs(5), "timeout took {elapsed:?}");
-    let closed = match n {
-        // 干净关闭（close_notify）或意外 EOF（连接已断开）都视为服务端已关闭
-        Ok(Ok(0)) | Ok(Err(_)) => true,
-        Ok(Ok(_)) => false,
-        Err(_) => false,
+    assert!(elapsed < Duration::from_secs(2), "timeout took {elapsed:?}");
+    let closed = match &n {
+        // 干净 EOF（close_notify）或 rustls 的 unexpected EOF（对端直接断开、无 close_notify）
+        // 视为服务端已关闭；外层超时或其他 I/O 错误不允许。
+        Ok(Ok(0)) => true,
+        Ok(Err(e)) => e.kind() == std::io::ErrorKind::UnexpectedEof,
+        _ => false,
     };
     assert!(
         closed,

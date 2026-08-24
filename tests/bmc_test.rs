@@ -162,10 +162,21 @@ fn redirect_policy_blocks_https_downgrade() {
         decide_redirect(&[], &http),
         "no previous hop is not a downgrade"
     );
-    let chain: Vec<url::Url> = (0..10)
+    // 上限边界：previous 含初始 URL，最多 9 次重定向；第 10 跳被拒绝。
+    let chain9: Vec<url::Url> = (0..9)
         .map(|i| url::Url::parse(&format!("https://bmc.example/r{i}")).unwrap())
         .collect();
-    assert!(!decide_redirect(&chain, &http), "10-hop limit enforced");
+    assert!(
+        decide_redirect(&chain9, &https2),
+        "initial + 8 redirects still allows the 9th"
+    );
+    let chain10: Vec<url::Url> = (0..10)
+        .map(|i| url::Url::parse(&format!("https://bmc.example/r{i}")).unwrap())
+        .collect();
+    assert!(
+        !decide_redirect(&chain10, &https2),
+        "10 previous URLs (initial + 9 redirects) block the 10th redirect"
+    );
 }
 
 /// 会话句柄的 delete() 对会话 URI 发起 DELETE 请求。
