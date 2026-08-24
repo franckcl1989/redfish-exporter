@@ -72,6 +72,7 @@ Fast group (every round): sensors, power, processors, memory, system/chassis/man
 - **Slow group**: collectors that dominate round time on real hardware (storage, network, firmware, assembly, event logs, BIOS — see audit §5) run at most once per `slow_interval` (default: every round). Results are cached in the scraper (`slow_state`) and last-good output survives a failed slow collection.
 - **404 fast-skip**: if the ServiceRoot fetch returns 404, the round is skipped and an `up=0` snapshot without failed-resource accounting is published (`is_not_found` in `collector/error.rs`); other 404s still count as failed resources.
 - **Snapshot consistency**: the registry per BMC is built fresh each round and swapped in atomically, so `/metrics` always returns one consistent snapshot per BMC and never a partially-written one.
+- **Pre-encoded snapshot cache**: each published registry is encoded to Prometheus text bytes once at publish time (`Snapshot::update` stores `RegistryEntry { registry, encoded }` with a reused scratch buffer); `/metrics` concatenates the stored bytes with zero live encoding (hot path ~ms vs ~310ms live encoding at ~10k series). Cost: one extra encoded copy per BMC in memory (~1.1MB for the Dell snapshot). Output is byte-identical to live encoding (pinned by the equivalence test in `tests/http_test.rs`).
 
 ## Adaptive scheduling (stability)
 
