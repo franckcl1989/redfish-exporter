@@ -28,3 +28,34 @@ jobs:
         run: cargo audit
       - name: Deny policy checks
         uses: EmbarkStudios/cargo-deny-action@v2
+  graceful-shutdown-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+      - name: Build
+        run: cargo build
+      - name: SIGTERM graceful shutdown smoke
+        run: |
+          set -euo pipefail
+          cat > /tmp/smoke-config.yaml <<'EOF'
+          listen_addr: "127.0.0.1:19417"
+          scrape_interval: "60s"
+          scrape_timeout: "15s"
+          request_timeout: "10s"
+          bmcs:
+            - name: unreachable
+              host: http://127.0.0.1:1
+              username: u
+              password: "p"
+          EOF
+          ./target/debug/redfish-exporter -c /tmp/smoke-config.yaml > /tmp/smoke.log 2>&1 &
+          pid=$!
+          sleep 2
+          kill -TERM "$pid"
+          wait "$pid" && rc=0 || rc=$?
+          echo "exporter exit code: $rc"
+          test "$rc" -eq 0
+          grep -q "shutdown complete" /tmp/smoke.log
