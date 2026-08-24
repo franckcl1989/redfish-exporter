@@ -150,6 +150,7 @@ pub fn register_into(
         names.sort();
         names.dedup();
         let gv = vecs.entry((m.name, m.help)).or_insert_with(|| {
+            // 不变量：GaugeVec 以 'static 字面量名构造，不可能失败；失败即程序缺陷，panic 合理。
             prometheus::GaugeVec::new(prometheus::Opts::new(m.name, m.help), &names)
                 .expect("GaugeVec construction with &'static str names cannot fail")
         });
@@ -185,6 +186,7 @@ pub fn register_into(
 pub fn encode(registry: &prometheus::Registry) -> String {
     use prometheus::TextEncoder;
     let mut buf = String::new();
+    // 不变量：encode_utf8 写入 String 不会失败；失败即程序缺陷，panic 合理。
     TextEncoder::new()
         .encode_utf8(&registry.gather(), &mut buf)
         .expect("TextEncoder::encode_utf8 writes to String and cannot fail");

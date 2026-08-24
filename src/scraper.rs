@@ -13,6 +13,7 @@ use crate::collector::error::{ConcreteBmc, is_not_found};
 use crate::collector::{ScrapeReport, collect_fast, collect_slow, finalize_report, merge_reports};
 use crate::config::{AuthMethod, Config};
 use crate::metrics::{Metric, UP};
+use crate::recover_lock;
 use crate::registry::{Snapshot, build_registry};
 
 /// 在 deadline 内运行 future；超时返回 None。
@@ -55,10 +56,7 @@ impl Scraper {
                                 est.token,
                             ));
                         handle.session_established.store(true, Ordering::SeqCst);
-                        sessions
-                            .lock()
-                            .unwrap()
-                            .insert(bmc_cfg.name.clone(), est.session);
+                        recover_lock(sessions.lock()).insert(bmc_cfg.name.clone(), est.session);
                     }
                     Err(e) => {
                         warn!(
@@ -92,10 +90,7 @@ impl Scraper {
                     _ = stop.changed() => {
                         // graceful shutdown：删除已建立会话，避免 BMC 侧会话泄漏。
                         // 先取出全部会话再 await，避免持锁跨 await。
-                        let to_delete = self
-                            .sessions
-                            .lock()
-                            .unwrap()
+                        let to_delete = recover_lock(self.sessions.lock())
                             .iter()
                             .filter_map(|(n, s)| s.as_ref().map(|s| (n.clone(), Arc::clone(s))))
                             .collect::<Vec<_>>();
@@ -144,7 +139,7 @@ impl Scraper {
                                 est.token,
                             ));
                             session_established.store(true, Ordering::SeqCst);
-                            sessions.lock().unwrap().insert(name.clone(), est.session);
+                            recover_lock(sessions.lock()).insert(name.clone(), est.session);
                             info!(bmc = %name, "session established on first round");
                         } else {
                             warn!(
@@ -178,7 +173,7 @@ impl Scraper {
                                     );
                                     // 旧会话已因 401 过期（token 失效），无需 delete 清理；
                                     // 仅更新存储的会话句柄供 shutdown 删除。
-                                    sessions.lock().unwrap().insert(name.clone(), est.session);
+                                    recover_lock(sessions.lock()).insert(name.clone(), est.session);
                                     info!(bmc = %name, "session re-established, retrying scrape");
                                     collect_round(
                                         Arc::clone(&bmc),
@@ -349,7 +344,7 @@ async fn collect_round(
             });
         }
     };
-    let cache = slow_state.lock().unwrap().get(name).cloned();
+    let cache = recover_lock(slow_state.lock()).get(name).cloned();
     let mut slow_report = cache.as_ref().and_then(|(_, r)| r.clone());
     let mut slow_failed = Vec::new();
     if slow_due(cache.as_ref().map(|(t, _)| *t), slow_interval) {
@@ -365,14 +360,12 @@ async fn collect_round(
         if failed.is_empty() {
             slow_report = new_cache.as_ref().and_then(|(_, r)| r.clone());
             if let Some(entry) = new_cache {
-                slow_state.lock().unwrap().insert(name.to_string(), entry);
+                recover_lock(slow_state.lock()).insert(name.to_string(), entry);
             }
         } else {
             // 失败也更新时间戳：慢组按 slow_interval 节奏重试，避免每轮重试打爆慢 BMC。
             slow_failed = failed;
-            slow_state
-                .lock()
-                .unwrap()
+            recover_lock(slow_state.lock())
                 .insert(name.to_string(), (Instant::now(), slow_report.clone()));
             warn!(
                 bmc = %name,

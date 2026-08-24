@@ -163,7 +163,9 @@ pub async fn load_tls(web: &crate::config::WebConfig) -> anyhow::Result<Option<R
             Ok(Some(cfg))
         }
         (None, None) => Ok(None),
-        _ => unreachable!("cert/key pairing validated in load_config"),
+        _ => Err(anyhow::anyhow!(
+            "web: tls_cert_file and tls_key_file must be set together (validated in load_config)"
+        )),
     }
 }
 

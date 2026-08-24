@@ -97,16 +97,25 @@ async fn main() -> anyhow::Result<()> {
 /// 等待 SIGINT（Ctrl+C）或 SIGTERM（Unix）；Windows 仅支持 Ctrl+C。
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!(error = %e, "failed to install Ctrl+C handler");
+                std::process::exit(1);
+            }
+        }
     };
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to install SIGTERM handler");
+                std::process::exit(1);
+            }
+        }
     };
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();

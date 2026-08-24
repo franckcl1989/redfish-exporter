@@ -5,6 +5,7 @@ use crate::collector::ScrapeReport;
 use crate::metrics::{
     BUILD_INFO, Metric, MetricsError, SCRAPE_ERROR, SCRAPE_ERRORS_TOTAL, UP, register_into,
 };
+use crate::recover_lock;
 
 /// 指标快照：RwLock 内为每个 BMC 各存一个 Arc 指针，update 按 BMC 名
 /// 插入/替换，读取不克隆底层 registry。errors 记录跨轮累计的失败资源数，
@@ -31,19 +32,14 @@ impl Snapshot {
 
     /// 累计指定 BMC 的失败资源数（跨轮累加）。
     pub fn record_scrape_errors(&self, bmc: &str, count: u64) {
-        *self
-            .errors
-            .lock()
-            .expect("snapshot errors mutex poisoned")
+        *recover_lock(self.errors.lock())
             .entry(bmc.to_string())
             .or_insert(0) += count;
     }
 
     /// 指定 BMC 累计失败资源数；从未记录过时为 0。
     pub fn scrape_errors(&self, bmc: &str) -> u64 {
-        self.errors
-            .lock()
-            .expect("snapshot errors mutex poisoned")
+        recover_lock(self.errors.lock())
             .get(bmc)
             .copied()
             .unwrap_or(0)
@@ -51,35 +47,22 @@ impl Snapshot {
 
     /// 插入或替换指定 BMC 的快照 registry（原子，按 BMC 隔离）。
     pub fn update(&self, bmc_name: &str, registry: Arc<prometheus::Registry>) {
-        self.inner
-            .write()
-            .expect("snapshot rwlock poisoned")
-            .insert(bmc_name.to_string(), registry);
+        recover_lock(self.inner.write()).insert(bmc_name.to_string(), registry);
     }
 
     /// 读取指定 BMC 的快照；该 BMC 从未采集过时为 None。
     pub fn registry(&self, bmc_name: &str) -> Option<Arc<prometheus::Registry>> {
-        self.inner
-            .read()
-            .expect("snapshot rwlock poisoned")
-            .get(bmc_name)
-            .cloned()
+        recover_lock(self.inner.read()).get(bmc_name).cloned()
     }
 
     /// 没有任何 BMC 的快照时返回 true（/metrics 据此返回 no-data-yet）。
     pub fn is_empty(&self) -> bool {
-        self.inner
-            .read()
-            .expect("snapshot rwlock poisoned")
-            .is_empty()
+        recover_lock(self.inner.read()).is_empty()
     }
 
     /// 所有 BMC 的 (name, registry) 快照对，按 BMC 名排序保证输出确定性。
     pub fn registries(&self) -> Vec<(String, Arc<prometheus::Registry>)> {
-        let mut pairs: Vec<_> = self
-            .inner
-            .read()
-            .expect("snapshot rwlock poisoned")
+        let mut pairs: Vec<_> = recover_lock(self.inner.read())
             .iter()
             .map(|(name, reg)| (name.clone(), Arc::clone(reg)))
             .collect();
