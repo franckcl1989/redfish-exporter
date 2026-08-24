@@ -106,7 +106,7 @@ async fn perf_benchmark_mock_pipeline() {
     let bytes_max = *bytes_lens.iter().max().unwrap();
     let bytes_med = median(&bytes_lens.iter().map(|&b| b as f64).collect::<Vec<_>>());
     println!(
-        "perf: rounds={ROUNDS} round_ms_med={rm:.2} encode_ms_med={em:.2} hot_path_ms_min={hm_min:.4}/med={hm:.4}/max={hm_max:.4} bytes_min={bytes_min}/med={bytes_med:.0}/max={bytes_max} rss_mb={rss_mb:.1}"
+        "perf: rounds={ROUNDS} round_ms_med={rm:.2} encode_ms_med={em:.3} hot_path_ms_min={hm_min:.6}/med={hm:.6}/max={hm_max:.6} bytes_min={bytes_min}/med={bytes_med:.0}/max={bytes_max} rss_mb={rss_mb:.1}"
     );
     if std::env::var("PERF_ASSERT").is_ok() {
         assert!(hm < 10.0, "hot path median {hm}ms >= 10ms");
