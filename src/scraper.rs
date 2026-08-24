@@ -185,11 +185,10 @@ impl Scraper {
                     *state = on_round_result(state, &outcome, failed, &stability, Instant::now());
                     match outcome.report {
                         Some(report) => {
-                            // 会话降级标记（ruling Q2）：推进后仍处于 SessionDegraded 的成功轮
-                            // （纯 basic 兜底轮与重挂失败的兜底成功轮）追加
-                            // redfish_scrape_error{resource="session-degraded"}=1（spec §4.3「持续提示」）。
-                            // 标记以指标形式追加，failed_resources 保持为空 →
-                            // build_registry 不覆盖 up=1、不累计 errors_total。
+                            // 会话降级标记（ruling Q2）：推进后仍处于 SessionDegraded 的轮即追加
+                            // redfish_scrape_error{resource="session-degraded"}=1（spec §4.3「持续提示」）——
+                            // 成功轮（up=1）与部分失败轮（up=0 + 具体失败资源）均带标记；
+                            // 标记以指标形式追加，不触碰 failed_resources，不影响 errors_total 累计判定。
                             let degraded_mark = matches!(state, BmcState::SessionDegraded { .. });
                             let report = if degraded_mark {
                                 with_degraded_mark(report, &name)
@@ -341,9 +340,12 @@ pub async fn run_bmc_round(
             Some(password.expose().to_string()),
         ));
     }
-    // 轮首 session 建立（首轮 / SessionRetry 轮）：失败则 basic 兜底并记入 session_recovery_failed，
-    // 使重挂失败的兜底成功轮留在 SessionDegraded（而非误升 Healthy）；Healthy 首轮建立失败
-    // 按原行为 basic 兜底采集（成功轮 up=1 可达，不进降级）。
+    // 所有 session 建立失败轮（不止 401 重登轮）都记入 session_recovery_failed（re-ruling）：
+    // session 坏死的 BMC（如 Inspur 建立永不成功）的失败轮（401 重登失败路径）据此经
+    // Healthy 失败分支路由进 SessionDegraded——此后 session 建立按退避节奏重试，而非每轮
+    // 反复打 session 端点（spec §4.1）；SessionRetry 轮重挂失败的兜底成功轮据此留在
+    // SessionDegraded（不误升 Healthy）；basic 采集成功的轮走 ok 分支优先，保持 Healthy、
+    // up=1 可达、不进降级。
     let mut session_recovery_failed = false;
     if auth == AuthMethod::Session && attempt_session && !session_established.load(Ordering::SeqCst)
     {
