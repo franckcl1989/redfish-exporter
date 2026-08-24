@@ -144,25 +144,45 @@ pub fn register_into(
 ) -> Result<(), MetricsError> {
     use std::collections::HashMap;
 
-    let mut vecs: HashMap<(&'static str, &'static str), prometheus::GaugeVec> = HashMap::new();
+    // 第一阶段：收集每个 (name, help) 组的 label 名并集（排序去重）。
+    // GaugeVec 需预先声明 label 名集合；不同 label 集的指标共享同一 GaugeVec，
+    // 缺失 label 以空值兜底（等价守护测试钉住的行为）。
+    let mut group_names: HashMap<(&'static str, &'static str), Vec<&'static str>> =
+        HashMap::with_capacity(metrics.len());
     for m in metrics {
-        let mut names: Vec<&'static str> = m.labels.iter().map(|(k, _)| *k).collect();
+        group_names
+            .entry((m.name, m.help))
+            .or_default()
+            .extend(m.labels.iter().map(|(k, _)| *k));
+    }
+    for names in group_names.values_mut() {
         names.sort();
         names.dedup();
-        let gv = vecs.entry((m.name, m.help)).or_insert_with(|| {
-            // 不变量：GaugeVec 以 'static 字面量名构造，不可能失败；失败即程序缺陷，panic 合理。
-            prometheus::GaugeVec::new(prometheus::Opts::new(m.name, m.help), &names)
-                .expect("GaugeVec construction with &'static str names cannot fail")
-        });
+    }
+
+    // 第二阶段：每组一个 GaugeVec。
+    // 不变量：GaugeVec 以 'static 字面量名构造，不可能失败；失败即程序缺陷，panic 合理。
+    let mut vecs: HashMap<(&'static str, &'static str), prometheus::GaugeVec> =
+        HashMap::with_capacity(group_names.len());
+    for ((name, help), names) in &group_names {
+        vecs.insert(
+            (*name, *help),
+            prometheus::GaugeVec::new(prometheus::Opts::new(*name, *help), names)
+                .expect("GaugeVec construction with &'static str names cannot fail"),
+        );
+    }
+
+    // 第三阶段：逐指标 set。
+    // 微观优化：每 metric 先建 label 映射，取值 O(L)（原实现每 label 线性查找 O(L²)）。
+    for m in metrics {
+        let names = &group_names[&(m.name, m.help)];
+        let mut lookup: HashMap<&'static str, &str> = HashMap::with_capacity(m.labels.len());
+        for (k, v) in &m.labels {
+            lookup.entry(*k).or_insert(v.as_str());
+        }
         let label_values: Vec<String> = names
             .iter()
-            .map(|n| {
-                m.labels
-                    .iter()
-                    .find(|(k, _)| k == n)
-                    .map(|(_, v)| v.clone())
-                    .unwrap_or_default()
-            })
+            .map(|n| lookup.get(n).copied().unwrap_or_default().to_string())
             .collect();
         debug_assert_eq!(
             label_values.len(),
@@ -170,6 +190,7 @@ pub fn register_into(
             "label cardinality mismatch for '{}'",
             m.name
         );
+        let gv = &vecs[&(m.name, m.help)];
         gv.with_label_values(&label_values).set(m.value);
     }
     for (_, gv) in vecs {

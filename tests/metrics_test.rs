@@ -48,3 +48,26 @@ fn duplicate_labels_are_merged() {
     let out = encode(&reg);
     assert_eq!(out.matches("redfish_sensor_reading{").count(), 1);
 }
+
+#[test]
+fn register_into_label_lookup_equivalent_for_mixed_label_sets() {
+    // 同一指标名下不同 label 集合（模拟多资源序列）：缺失 label 以空值兜底，注册不冲突。
+    let registry = prometheus::Registry::new();
+    let m1 = Metric::gauge("redfish_health_status", "h")
+        .label("bmc", "b1".into())
+        .label("resource_type", "system".into())
+        .build(1.0);
+    let m2 = Metric::gauge("redfish_health_status", "h")
+        .label("bmc", "b2".into())
+        .build(1.0);
+    redfish_exporter::metrics::register_into(&[m1, m2], &registry).unwrap();
+    let out = encode(&registry);
+    assert!(
+        out.contains("redfish_health_status{bmc=\"b1\",resource_type=\"system\"} 1"),
+        "{out}"
+    );
+    assert!(
+        out.contains("redfish_health_status{bmc=\"b2\",resource_type=\"\"} 1"),
+        "{out}"
+    );
+}
