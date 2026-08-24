@@ -36,6 +36,13 @@ async fn main() -> anyhow::Result<()> {
 
     let mut cfg = config::load_config(&args.config)
         .with_context(|| format!("failed to load config from {}", args.config.display()))?;
+    #[cfg(unix)]
+    if config::config_file_is_wide_open(&args.config) {
+        tracing::warn!(
+            path = %args.config.display(),
+            "config file is readable by group/others; consider chmod 600"
+        );
+    }
     if let Some(port) = args.port {
         cfg.listen_addr.set_port(port);
     }

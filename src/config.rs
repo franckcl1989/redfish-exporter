@@ -333,3 +333,12 @@ fn build_web_config(raw: &RawWebConfig) -> Result<WebConfig, ConfigError> {
         tls_key_file: tls.1,
     })
 }
+
+/// Unix：配置文件是否对 group/other 可读（mode & 0o077 != 0）。Windows 无此函数。
+#[cfg(unix)]
+pub fn config_file_is_wide_open(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .map(|m| m.mode() & 0o077 != 0)
+        .unwrap_or(false)
+}

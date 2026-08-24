@@ -251,6 +251,18 @@ fn web_tls_cert_requires_key() {
     assert!(matches!(load_config(&p), Err(ConfigError::Invalid(_))));
 }
 
+#[cfg(unix)]
+#[test]
+fn detects_wide_open_config_permissions() {
+    use redfish_exporter::config::config_file_is_wide_open;
+    use std::os::unix::fs::PermissionsExt;
+    let p = write_tmp("perm_wide", "bmcs: []\n");
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(config_file_is_wide_open(&p));
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(!config_file_is_wide_open(&p));
+}
+
 #[test]
 fn web_token_file_content_is_loaded() {
     let dir = std::env::temp_dir().join(format!("redfish-exporter-test-{}", std::process::id()));
