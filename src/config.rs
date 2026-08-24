@@ -56,6 +56,13 @@ pub struct WebConfig {
     pub tls_key_file: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub struct StabilityConfig {
+    pub cooldown_failures: u32,
+    pub cooldown_base: Duration,
+    pub cooldown_max: Duration,
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub listen_addr: SocketAddr,
@@ -65,6 +72,7 @@ pub struct Config {
     pub request_timeout: Duration,
     pub bmcs: Vec<BmcConfig>,
     pub web: WebConfig,
+    pub stability: StabilityConfig,
 }
 
 #[derive(Debug, Error)]
@@ -100,6 +108,44 @@ struct RawWebConfig {
 }
 
 #[derive(Deserialize)]
+struct RawStabilityConfig {
+    #[serde(default = "default_cooldown_failures")]
+    cooldown_failures: u32,
+    #[serde(
+        default = "default_cooldown_base",
+        deserialize_with = "deserialize_duration"
+    )]
+    cooldown_base: Duration,
+    #[serde(
+        default = "default_cooldown_max",
+        deserialize_with = "deserialize_duration"
+    )]
+    cooldown_max: Duration,
+}
+
+// 不能 derive Default：serde 的 #[serde(default)] 在整节缺失时调用 Default::default()，
+// derive 版会得到全零值，导致缺失 stability 节时校验失败。手动实现返回真实默认值。
+impl Default for RawStabilityConfig {
+    fn default() -> Self {
+        Self {
+            cooldown_failures: default_cooldown_failures(),
+            cooldown_base: default_cooldown_base(),
+            cooldown_max: default_cooldown_max(),
+        }
+    }
+}
+
+fn default_cooldown_failures() -> u32 {
+    3
+}
+fn default_cooldown_base() -> Duration {
+    Duration::from_secs(60)
+}
+fn default_cooldown_max() -> Duration {
+    Duration::from_secs(300)
+}
+
+#[derive(Deserialize)]
 struct RawConfig {
     #[serde(default = "default_listen_addr")]
     listen_addr: String,
@@ -127,6 +173,8 @@ struct RawConfig {
     bmcs: Vec<RawBmcConfig>,
     #[serde(default)]
     web: RawWebConfig,
+    #[serde(default)]
+    stability: RawStabilityConfig,
 }
 
 fn default_listen_addr() -> String {
@@ -298,6 +346,21 @@ pub fn load_config_with_env(
         return Err(ConfigError::Invalid("request_timeout must be > 0".into()));
     }
     let web = build_web_config(&mut raw.web)?;
+    if raw.stability.cooldown_failures == 0 {
+        return Err(ConfigError::Invalid(
+            "stability.cooldown_failures must be > 0".into(),
+        ));
+    }
+    if raw.stability.cooldown_base.is_zero() || raw.stability.cooldown_max.is_zero() {
+        return Err(ConfigError::Invalid(
+            "stability: cooldown_base and cooldown_max must be > 0".into(),
+        ));
+    }
+    if raw.stability.cooldown_max < raw.stability.cooldown_base {
+        return Err(ConfigError::Invalid(
+            "stability: cooldown_max must be >= cooldown_base".into(),
+        ));
+    }
     Ok(Config {
         listen_addr,
         scrape_interval: raw.scrape_interval,
@@ -306,6 +369,11 @@ pub fn load_config_with_env(
         request_timeout: raw.request_timeout,
         bmcs,
         web,
+        stability: StabilityConfig {
+            cooldown_failures: raw.stability.cooldown_failures,
+            cooldown_base: raw.stability.cooldown_base,
+            cooldown_max: raw.stability.cooldown_max,
+        },
     })
 }
 

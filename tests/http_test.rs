@@ -59,6 +59,11 @@ fn test_config(hosts: &[(&str, &str)]) -> Config {
         request_timeout: Duration::from_secs(10),
         bmcs: hosts.iter().map(|(n, h)| bmc(n, h)).collect(),
         web: WebConfig::default(),
+        stability: redfish_exporter::config::StabilityConfig {
+            cooldown_failures: 3,
+            cooldown_base: Duration::from_secs(60),
+            cooldown_max: Duration::from_secs(300),
+        },
     }
 }
 

@@ -353,3 +353,75 @@ fn web_token_file_missing_fails_config_load() {
         Err(ConfigError::Io(_))
     ));
 }
+
+#[test]
+fn stability_defaults_are_applied() {
+    let p = write_tmp(
+        "stab_default",
+        "bmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
+    );
+    let cfg = load_config_with_env(&p, |_| None).unwrap();
+    assert_eq!(cfg.stability.cooldown_failures, 3);
+    assert_eq!(
+        cfg.stability.cooldown_base,
+        std::time::Duration::from_secs(60)
+    );
+    assert_eq!(
+        cfg.stability.cooldown_max,
+        std::time::Duration::from_secs(300)
+    );
+}
+
+#[test]
+fn stability_section_parses() {
+    let p = write_tmp(
+        "stab_parse",
+        "stability:\n  cooldown_failures: 5\n  cooldown_base: \"30s\"\n  cooldown_max: \"600s\"\nbmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
+    );
+    let cfg = load_config_with_env(&p, |_| None).unwrap();
+    assert_eq!(cfg.stability.cooldown_failures, 5);
+    assert_eq!(
+        cfg.stability.cooldown_base,
+        std::time::Duration::from_secs(30)
+    );
+    assert_eq!(
+        cfg.stability.cooldown_max,
+        std::time::Duration::from_secs(600)
+    );
+}
+
+#[test]
+fn stability_rejects_zero_failures() {
+    let p = write_tmp(
+        "stab_zero_f",
+        "stability:\n  cooldown_failures: 0\nbmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
+    );
+    assert!(matches!(
+        load_config_with_env(&p, |_| None),
+        Err(ConfigError::Invalid(_))
+    ));
+}
+
+#[test]
+fn stability_rejects_max_less_than_base() {
+    let p = write_tmp(
+        "stab_max_lt_base",
+        "stability:\n  cooldown_base: \"300s\"\n  cooldown_max: \"60s\"\nbmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
+    );
+    assert!(matches!(
+        load_config_with_env(&p, |_| None),
+        Err(ConfigError::Invalid(_))
+    ));
+}
+
+#[test]
+fn stability_rejects_zero_durations() {
+    let p = write_tmp(
+        "stab_zero_d",
+        "stability:\n  cooldown_base: \"0s\"\nbmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
+    );
+    assert!(matches!(
+        load_config_with_env(&p, |_| None),
+        Err(ConfigError::Invalid(_))
+    ));
+}
