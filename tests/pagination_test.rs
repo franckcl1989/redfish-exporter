@@ -118,3 +118,68 @@ async fn stops_on_repeated_next_link_loop() {
     assert_eq!(pages[0]["Id"], "1");
     assert_eq!(pages[1]["Id"], "2");
 }
+
+#[tokio::test]
+async fn errors_when_page_limit_exceeded() {
+    let bmc = Arc::new(Mock::default());
+    let url: ODataId = ENTRIES.to_string().into();
+    for i in 0..3 {
+        let id = if i == 0 {
+            ENTRIES.to_string()
+        } else {
+            format!("{ENTRIES}?$skip={i}")
+        };
+        bmc.expect(Expect::get(
+            &id,
+            json!({
+                "@odata.id": id,
+                "Members": [{"Id": i}],
+                "Members@odata.nextLink": format!("{ENTRIES}?$skip={}", i + 1),
+            }),
+        ));
+    }
+    let res =
+        redfish_exporter::pagination::fetch_all_pages_with_limits(&bmc, &url, 2, 1024 * 1024, 100)
+            .await;
+    assert!(matches!(
+        res,
+        Err(redfish_exporter::pagination::PaginationError::TooManyPages(
+            2
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn errors_when_page_exceeds_size_limit() {
+    let bmc = Arc::new(Mock::default());
+    let url: ODataId = ENTRIES.to_string().into();
+    let big = "x".repeat(4096);
+    bmc.expect(Expect::get(
+        ENTRIES,
+        json!({ "@odata.id": ENTRIES, "Members": [{"Id": "0", "Message": big}] }),
+    ));
+    let res =
+        redfish_exporter::pagination::fetch_all_pages_with_limits(&bmc, &url, 1000, 512, 1000)
+            .await;
+    assert!(matches!(
+        res,
+        Err(redfish_exporter::pagination::PaginationError::PageTooLarge)
+    ));
+}
+
+#[tokio::test]
+async fn errors_when_total_members_exceeded() {
+    let bmc = Arc::new(Mock::default());
+    let url: ODataId = ENTRIES.to_string().into();
+    bmc.expect(Expect::get(
+        ENTRIES,
+        json!({ "@odata.id": ENTRIES, "Members": [{"Id": "1"}, {"Id": "2"}, {"Id": "3"}] }),
+    ));
+    let res =
+        redfish_exporter::pagination::fetch_all_pages_with_limits(&bmc, &url, 1000, 1024 * 1024, 2)
+            .await;
+    assert!(matches!(
+        res,
+        Err(redfish_exporter::pagination::PaginationError::TooManyMembers(2))
+    ));
+}

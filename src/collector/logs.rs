@@ -38,8 +38,18 @@ pub async fn collect_event_logs<B: Bmc>(
             let Some(entries_ref) = &raw.entries else {
                 continue;
             };
-            let Ok(entries) = fetch_all_pages(&bmc, entries_ref.id()).await else {
-                continue;
+            let entries = match fetch_all_pages(&bmc, entries_ref.id()).await {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!(
+                        bmc = %bmc_name,
+                        manager = %manager_id,
+                        service = %service_id,
+                        error = %e,
+                        "event log pagination failed, skipping log service"
+                    );
+                    continue;
+                }
             };
             for value in entries {
                 let Ok(entry) =
