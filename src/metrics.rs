@@ -95,6 +95,14 @@ pub const VOLUME_CAPACITY: (&str, &str) =
     ("redfish_volume_capacity_bytes", "Volume capacity in bytes");
 pub const DRIVE_CAPACITY: (&str, &str) =
     ("redfish_drive_capacity_bytes", "Drive capacity in bytes");
+pub const DRIVE_INFO: (&str, &str) = (
+    "redfish_drive_info",
+    "Drive vendor identifier information, 1 = present",
+);
+pub const DRIVE_OEM_STATUS: (&str, &str) = (
+    "redfish_drive_oem_status",
+    "Drive vendor OEM status, 1 = present with status labels",
+);
 pub const STORAGE_CONTROLLER_INFO: (&str, &str) = (
     "redfish_storage_controller_info",
     "Storage controller model and firmware information, 1 = present",

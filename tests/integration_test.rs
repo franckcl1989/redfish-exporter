@@ -245,6 +245,41 @@ async fn storage_controller_metrics() {
     );
 }
 
+/// 驱动器 OEM 指标：Dell DellPhysicalDisk 的 WWN/RaidStatus/PowerStatus
+/// 按真机探测路径采集（Drive facade raw 保留 Oem 块，经类型化 Oem 导航）。
+#[tokio::test]
+async fn drive_oem_metrics() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc, &["Systems"]);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, &["Storage"]);
+    expect_storage_payloads(&bmc);
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = redfish_exporter::collector::storage::collect_storage(bmc, &root, "bmc1")
+        .await
+        .unwrap();
+
+    let registry = prometheus::Registry::new();
+    redfish_exporter::metrics::register_into(&metrics, &registry).unwrap();
+    let out = redfish_exporter::metrics::encode(&registry);
+
+    // 注意：register_into 对 label 名排序，TextEncoder 按 GaugeVec 声明的
+    // label 顺序（字母序）输出——与 brief 草图的顺序不同，此处以实际顺序断言。
+    assert!(
+        out.contains(
+            "redfish_drive_info{bmc=\"bmc1\",id=\"HDD1\",storage=\"SATA1\",system=\"1\",wwn=\"3F4EE0803B522508\"} 1"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "redfish_drive_oem_status{bmc=\"bmc1\",id=\"HDD1\",power_status=\"On\",raid_status=\"Online\",storage=\"SATA1\",system=\"1\"} 1"
+        ),
+        "{out}"
+    );
+}
+
 /// 测试 2：BMC 失败隔离。
 ///
 /// - 健康 BMC：完整流程成功（redfish_up=1）。

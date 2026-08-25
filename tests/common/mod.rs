@@ -315,6 +315,11 @@ pub fn expect_storage_payloads(bmc: &Mock) {
             "CapacityBytes": 1024,
             "PredictedMediaLifeLeftPercent": 80,
             "FailurePredicted": false,
+            "Oem": { "Dell": { "DellPhysicalDisk": {
+                "WWN": "3F4EE0803B522508",
+                "RaidStatus": "Online",
+                "PowerStatus": "On",
+            } } },
             "Metrics": { "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1/Drives/HDD1/Metrics" },
         }),
     ));

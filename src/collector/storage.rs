@@ -1,6 +1,7 @@
 use crate::collector::{push_health, push_info, status_labels};
 use crate::metrics::{
-    DRIVE_CAPACITY, Metric, STORAGE_CONTROLLER_INFO, STORAGE_CONTROLLER_STATUS, VOLUME_CAPACITY,
+    DRIVE_CAPACITY, DRIVE_INFO, DRIVE_OEM_STATUS, Metric, STORAGE_CONTROLLER_INFO,
+    STORAGE_CONTROLLER_STATUS, VOLUME_CAPACITY,
 };
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
@@ -189,6 +190,47 @@ async fn collect_drive<B: Bmc>(
     let id = drive.id().to_string();
     let (health, state) = status_labels(raw.status.as_ref());
     push_health(out, bmc_name, "drive", &id, &health, &state);
+    // 驱动器 OEM 字段（Dell DellPhysicalDisk；真机 Dell 有，浪潮驱动器明细
+    // 全 null 仅 Status 不产出）：Drive facade 的 raw 保留 Oem 块
+    // （Item.oem，与 Processor 同层），经类型化 OEM 直接导航，无需 raw JSON
+    // 重取。寿命字段 PredictedMediaLifeLeftPercent 真机为 null（NOT MET
+    // backlog），不采集；浪潮无 Oem 块，自然不产出。
+    if let Some(oem) = raw.base.base.oem.as_ref()
+        && let Some(dell) =
+            nv_redfish::oem::oem_value(oem, "Dell").and_then(|d| d.get("DellPhysicalDisk"))
+    {
+        if let Some(wwn) = dell.get("WWN").and_then(|v| v.as_str()).map(str::to_string) {
+            out.push(
+                Metric::gauge(DRIVE_INFO.0, DRIVE_INFO.1)
+                    .label("bmc", bmc_name.to_string())
+                    .label("system", system_id.to_string())
+                    .label("storage", storage_id.to_string())
+                    .label("id", id.clone())
+                    .label("wwn", wwn)
+                    .build(1.0),
+            );
+        }
+        let raid = dell
+            .get("RaidStatus")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let power = dell
+            .get("PowerStatus")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if !raid.is_empty() || !power.is_empty() {
+            out.push(
+                Metric::gauge(DRIVE_OEM_STATUS.0, DRIVE_OEM_STATUS.1)
+                    .label("bmc", bmc_name.to_string())
+                    .label("system", system_id.to_string())
+                    .label("storage", storage_id.to_string())
+                    .label("id", id.clone())
+                    .label("raid_status", raid.to_string())
+                    .label("power_status", power.to_string())
+                    .build(1.0),
+            );
+        }
+    }
     if let Some(value) = raw.manufacturer.clone().flatten() {
         push_info(out, bmc_name, "manufacturer", &value);
     }

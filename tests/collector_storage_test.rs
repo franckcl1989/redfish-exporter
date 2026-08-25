@@ -284,6 +284,67 @@ async fn collects_drive_metrics() {
     assert_eq!(info_values.get("serial_number"), Some(&"SN123"));
     assert_eq!(info_values.get("revision"), Some(&"A1"));
     assert_eq!(info_values.get("name"), Some(&"Volume 1"));
+
+    // 无 Oem 块（浪潮式驱动器：明细全 null 仅 Status）不得产出 OEM 指标。
+    assert!(
+        !metrics.iter().any(|m| m.name == "redfish_drive_info"),
+        "drive without Oem must not emit drive_info"
+    );
+    assert!(
+        !metrics.iter().any(|m| m.name == "redfish_drive_oem_status"),
+        "drive without Oem must not emit drive_oem_status"
+    );
+}
+
+#[tokio::test]
+async fn drive_oem_life_left_null_emits_oem_only() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, true);
+    expect_storage_collection(&bmc);
+    expect_storage(&bmc, true, false);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Systems/1/Storage/SATA1/Drives/HDD1",
+        json!({
+            "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1/Drives/HDD1",
+            "Id": "HDD1", "Name": "HDD 1",
+            "Status": { "Health": "OK", "State": "Enabled" },
+            // 真机探测：Dell/浪潮全部驱动器 PredictedMediaLifeLeftPercent
+            // 均 null（NOT MET backlog）——寿命字段不采集。
+            "PredictedMediaLifeLeftPercent": null,
+            "Oem": { "Dell": { "DellPhysicalDisk": {
+                "WWN": "3F4EE0803B522508",
+                "RaidStatus": "Online",
+                "PowerStatus": "On",
+            } } },
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_storage(bmc, &root, "bmc1").await.unwrap();
+
+    assert!(
+        !metrics
+            .iter()
+            .any(|m| m.name == "redfish_drive_life_left_percent"),
+        "null PredictedMediaLifeLeftPercent must not emit life-left metric"
+    );
+    let info: Vec<_> = metrics
+        .iter()
+        .filter(|m| m.name == "redfish_drive_info")
+        .collect();
+    assert_eq!(info.len(), 1);
+    let labels = labels_of(info[0]);
+    assert_eq!(labels.get("wwn"), Some(&"3F4EE0803B522508"));
+    let oem: Vec<_> = metrics
+        .iter()
+        .filter(|m| m.name == "redfish_drive_oem_status")
+        .collect();
+    assert_eq!(oem.len(), 1);
+    let labels = labels_of(oem[0]);
+    assert_eq!(labels.get("raid_status"), Some(&"Online"));
+    assert_eq!(labels.get("power_status"), Some(&"On"));
 }
 
 #[tokio::test]
