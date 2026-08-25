@@ -280,6 +280,87 @@ async fn drive_oem_metrics() {
     );
 }
 
+/// 系统/机箱 LED 指标：Systems/{id} 与 Chassis/{id} 顶层 IndicatorLED 字段
+/// （真机 Dell "Lit"、浪潮 "Off"）产出 state 标签；无该字段的机箱
+/// （Dell 背板 Enclosure.Internal.0-1）不得产出。
+#[tokio::test]
+async fn indicator_led_metrics() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc, &["Systems", "Chassis"]);
+
+    // systems 枚举：System 负载含 IndicatorLED=Lit（common expect_system 已加）
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, &[]);
+
+    // chassis 枚举：主机箱含 IndicatorLED=Lit，背板机箱无该字段（缺失分支）
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis",
+            "@odata.type": "#ChassisCollection.ChassisCollection",
+            "Name": "Chassis Collection",
+            "Members": [
+                { "@odata.id": "/redfish/v1/Chassis/1" },
+                { "@odata.id": "/redfish/v1/Chassis/Enclosure.Internal.0-1" },
+            ],
+            "Members@odata.count": 2,
+        }),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/1",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis/1",
+            "Id": "1", "Name": "Chassis 1", "ChassisType": "RackMount",
+            "IndicatorLED": "Lit",
+            "Status": { "Health": "OK", "State": "Enabled" },
+        }),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/Enclosure.Internal.0-1",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis/Enclosure.Internal.0-1",
+            "Id": "Enclosure.Internal.0-1", "Name": "Enclosure Chassis",
+            "ChassisType": "Enclosure",
+            "Status": { "Health": "OK", "State": "Enabled" },
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let mut metrics =
+        redfish_exporter::collector::systems::collect_systems(Arc::clone(&bmc), &root, "bmc1")
+            .await
+            .unwrap();
+    metrics.extend(
+        redfish_exporter::collector::systems::collect_chassis_health(bmc, &root, "bmc1")
+            .await
+            .unwrap(),
+    );
+
+    let registry = prometheus::Registry::new();
+    redfish_exporter::metrics::register_into(&metrics, &registry).unwrap();
+    let out = redfish_exporter::metrics::encode(&registry);
+
+    // 注意：register_into 对 label 名排序，TextEncoder 按 GaugeVec 声明的
+    // label 顺序（字母序 bmc/id/resource_type/state）输出——与 brief 草图顺序不同。
+    assert!(
+        out.contains(
+            "redfish_indicator_led{bmc=\"bmc1\",id=\"1\",resource_type=\"system\",state=\"Lit\"} 1"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "redfish_indicator_led{bmc=\"bmc1\",id=\"1\",resource_type=\"chassis\",state=\"Lit\"} 1"
+        ),
+        "{out}"
+    );
+    // 背板机箱无 IndicatorLED 字段：不得产出
+    assert!(
+        !out.contains("redfish_indicator_led{bmc=\"bmc1\",id=\"Enclosure.Internal.0-1\""),
+        "无 IndicatorLED 的机箱不得产出: {out}"
+    );
+}
+
 /// 测试 2：BMC 失败隔离。
 ///
 /// - 健康 BMC：完整流程成功（redfish_up=1）。

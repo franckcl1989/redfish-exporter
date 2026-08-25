@@ -66,6 +66,7 @@ pub fn expect_chassis_round(bmc: &Mock, with_links: bool) {
     let mut chassis = json!({
         "@odata.id": "/redfish/v1/Chassis/1",
         "Id": "1", "Name": "Chassis 1", "ChassisType": "RackMount",
+        "IndicatorLED": "Lit",
         "Status": { "Health": "OK", "State": "Enabled" },
         "Manufacturer": "Acme", "Model": "Server", "SerialNumber": "SN-C1", "PartNumber": "PN-C1",
     });
@@ -154,6 +155,7 @@ pub fn expect_system(bmc: &Mock, links: &[&str]) {
         "@odata.id": "/redfish/v1/Systems/1",
         "Id": "1", "Name": "System 1", "SystemType": "Physical",
         "PowerState": "On",
+        "IndicatorLED": "Lit",
         "Manufacturer": "Dell", "Model": "R750",
         "SerialNumber": "SN1", "SKU": "SKU1",
         "Status": { "Health": "OK", "State": "Enabled" },

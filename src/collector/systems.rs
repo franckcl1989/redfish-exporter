@@ -1,5 +1,5 @@
 use crate::collector::{push_health, push_info, status_labels};
-use crate::metrics::{Metric, POWER_STATE};
+use crate::metrics::{INDICATOR_LED, Metric, POWER_STATE};
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
 use nv_redfish::core::EntityTypeRef as _;
@@ -32,6 +32,18 @@ pub async fn collect_systems<B: Bmc>(
         let raw = system.raw();
         let (health, state) = status_labels(raw.status.as_ref());
         push_health(&mut out, bmc_name, "system", &system_id, &health, &state);
+        // IndicatorLED：nv-redfish 0.15 编译 schema 为 Option<Option<IndicatorLed>> 枚举
+        // （Unknown/Lit/Blinking/Off/UnsupportedValue），无 Display 实现，用 Debug 输出变体名。
+        if let Some(led) = raw.indicator_led.flatten() {
+            out.push(
+                Metric::gauge(INDICATOR_LED.0, INDICATOR_LED.1)
+                    .label("bmc", bmc_name.to_string())
+                    .label("resource_type", "system".to_string())
+                    .label("id", system_id.clone())
+                    .label("state", format!("{led:?}"))
+                    .build(1.0),
+            );
+        }
         if let Some(value) = raw.manufacturer.clone().flatten() {
             push_info(&mut out, bmc_name, "manufacturer", &value);
         }
@@ -67,6 +79,17 @@ pub async fn collect_chassis_health<B: Bmc>(
         let raw = chassis.raw();
         let (health, state) = status_labels(raw.status.as_ref());
         push_health(&mut out, bmc_name, "chassis", &chassis_id, &health, &state);
+        // IndicatorLED：同 systems 遍历，无该字段的机箱（如 Dell 背板机箱）不产出。
+        if let Some(led) = raw.indicator_led.flatten() {
+            out.push(
+                Metric::gauge(INDICATOR_LED.0, INDICATOR_LED.1)
+                    .label("bmc", bmc_name.to_string())
+                    .label("resource_type", "chassis".to_string())
+                    .label("id", chassis_id.clone())
+                    .label("state", format!("{led:?}"))
+                    .build(1.0),
+            );
+        }
         if let Some(value) = raw.manufacturer.clone().flatten() {
             push_info(&mut out, bmc_name, "manufacturer", &value);
         }

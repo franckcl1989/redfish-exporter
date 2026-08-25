@@ -59,6 +59,10 @@ pub const POWER_SUPPLY_INPUT_VOLTAGE: (&str, &str) = (
 );
 pub const POWER_INPUT: (&str, &str) = ("redfish_power_input_watts", "Chassis power input in watts");
 pub const POWER_STATE: (&str, &str) = ("redfish_power_state", "Power state of a system, 1 = On");
+pub const INDICATOR_LED: (&str, &str) = (
+    "redfish_indicator_led",
+    "Indicator LED state, 1 = present with state label",
+);
 pub const PROCESSOR_TEMPERATURE: (&str, &str) = (
     "redfish_processor_temperature_celsius",
     "Processor temperature in Celsius",
