@@ -189,8 +189,11 @@ pub fn expect_processor_payloads(bmc: &Mock) {
             "@odata.id": "/redfish/v1/Systems/1/Processors",
             "@odata.type": "#ProcessorCollection.ProcessorCollection",
             "Name": "Processor Collection",
-            "Members": [{ "@odata.id": "/redfish/v1/Systems/1/Processors/CPU1" }],
-            "Members@odata.count": 1,
+            "Members": [
+                { "@odata.id": "/redfish/v1/Systems/1/Processors/CPU1" },
+                { "@odata.id": "/redfish/v1/Systems/1/Processors/CPU2" },
+            ],
+            "Members@odata.count": 2,
         }),
     ));
     bmc.expect(Expect::get(
@@ -200,9 +203,28 @@ pub fn expect_processor_payloads(bmc: &Mock) {
             "Id": "CPU1", "Name": "CPU 1", "ProcessorType": "CPU",
             "Status": { "Health": "OK", "State": "Enabled" },
             "Manufacturer": "Intel", "Model": "Xeon Gold 6338",
+            "MaxSpeedMHz": 3400,
+            "Oem": {
+                "Dell": {
+                    "DellProcessor": { "Volts": "1.6", "CurrentClockSpeedMhz": 2100 },
+                },
+                "Public": { "FrequencyMHz": 2100 },
+            },
             "Metrics": { "@odata.id": "/redfish/v1/Systems/1/Processors/CPU1/Metrics" },
         }),
     ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/Systems/1/Processors/CPU2",
+        json!({
+            "@odata.id": "/redfish/v1/Systems/1/Processors/CPU2",
+            "Id": "CPU2", "Name": "CPU 2", "ProcessorType": "CPU",
+            "Status": { "Health": "OK", "State": "Enabled" },
+            "Manufacturer": "Intel", "Model": "Xeon Gold 6338",
+            "MaxSpeedMHz": 3400,
+        }),
+    ));
+    // 注意顺序：mock 按注册顺序（FIFO）匹配期望，而 nv-redfish 先取全部成员负载
+    // （CPU1、CPU2）再请求 Metrics 链接，故 CPU2 的期望须排在 CPU1/Metrics 之前。
     bmc.expect(Expect::get(
         "/redfish/v1/Systems/1/Processors/CPU1/Metrics",
         json!({

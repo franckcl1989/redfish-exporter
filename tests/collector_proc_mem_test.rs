@@ -203,6 +203,105 @@ async fn collects_processor_metrics() {
 }
 
 #[tokio::test]
+async fn collects_processor_frequency_voltage_metrics() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, true, true);
+    expect_processor_collection(&bmc);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Systems/1/Processors/CPU1",
+        json!({
+            "@odata.id": "/redfish/v1/Systems/1/Processors/CPU1",
+            "Id": "CPU1", "Name": "CPU 1", "ProcessorType": "CPU",
+            "Status": { "Health": "OK", "State": "Enabled" },
+            "Manufacturer": "Intel", "Model": "Xeon Gold 6338",
+            "MaxSpeedMHz": 3400,
+            "Oem": {
+                "Dell": {
+                    "DellProcessor": { "Volts": "1.6", "CurrentClockSpeedMhz": 2100 },
+                },
+                "Public": { "FrequencyMHz": 2100 },
+            },
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_processors(bmc, &root, "bmc1").await.unwrap();
+
+    // 当前频率：Dell OEM 优先（mock 中 Dell 与 Public 并存，取 Dell 值一致时无法区分优先级，
+    // 值断言 + 标签断言保证产出正确序列）。
+    let frequency: Vec<_> = metrics
+        .iter()
+        .filter(|m| m.name == "redfish_processor_frequency_mhz")
+        .collect();
+    assert_eq!(frequency.len(), 1);
+    assert_eq!(frequency[0].value, 2100.0);
+    let labels = labels_of(frequency[0]);
+    assert_eq!(labels.get("bmc"), Some(&"bmc1"));
+    assert_eq!(labels.get("system"), Some(&"1"));
+    assert_eq!(labels.get("id"), Some(&"CPU1"));
+
+    let max_frequency: Vec<_> = metrics
+        .iter()
+        .filter(|m| m.name == "redfish_processor_max_frequency_mhz")
+        .collect();
+    assert_eq!(max_frequency.len(), 1);
+    assert_eq!(max_frequency[0].value, 3400.0);
+
+    let voltage: Vec<_> = metrics
+        .iter()
+        .filter(|m| m.name == "redfish_processor_voltage_volts")
+        .collect();
+    assert_eq!(voltage.len(), 1);
+    assert_eq!(voltage[0].value, 1.6);
+    let labels = labels_of(voltage[0]);
+    assert_eq!(labels.get("bmc"), Some(&"bmc1"));
+    assert_eq!(labels.get("system"), Some(&"1"));
+    assert_eq!(labels.get("id"), Some(&"CPU1"));
+}
+
+#[tokio::test]
+async fn processor_without_oem_fields_emits_no_frequency_voltage() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, true, true);
+    expect_processor_collection(&bmc);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Systems/1/Processors/CPU1",
+        json!({
+            "@odata.id": "/redfish/v1/Systems/1/Processors/CPU1",
+            "Id": "CPU1", "Name": "CPU 1", "ProcessorType": "CPU",
+            "Status": { "Health": "OK", "State": "Enabled" },
+            "Manufacturer": "Intel", "Model": "Xeon Gold 6338",
+            "MaxSpeedMHz": 3400,
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_processors(bmc, &root, "bmc1").await.unwrap();
+
+    // 无 Metrics 链接且无 OEM 扩展：仅最大频率（标准字段）产出，频率/电压不产出。
+    let max_frequency: Vec<_> = metrics
+        .iter()
+        .filter(|m| m.name == "redfish_processor_max_frequency_mhz")
+        .collect();
+    assert_eq!(max_frequency.len(), 1);
+    assert_eq!(max_frequency[0].value, 3400.0);
+    assert!(
+        !metrics
+            .iter()
+            .any(|m| m.name == "redfish_processor_frequency_mhz")
+    );
+    assert!(
+        !metrics
+            .iter()
+            .any(|m| m.name == "redfish_processor_voltage_volts")
+    );
+}
+
+#[tokio::test]
 async fn collects_memory_metrics() {
     let bmc = Arc::new(Mock::default());
     expect_service_root(&bmc);

@@ -65,6 +65,18 @@ pub const PROCESSOR_TEMPERATURE: (&str, &str) = (
 );
 pub const PROCESSOR_POWER: (&str, &str) =
     ("redfish_processor_power_watts", "Processor power in watts");
+pub const PROCESSOR_FREQUENCY: (&str, &str) = (
+    "redfish_processor_frequency_mhz",
+    "Current operating frequency of the processor in MHz",
+);
+pub const PROCESSOR_MAX_FREQUENCY: (&str, &str) = (
+    "redfish_processor_max_frequency_mhz",
+    "Maximum rated frequency of the processor in MHz",
+);
+pub const PROCESSOR_VOLTAGE: (&str, &str) = (
+    "redfish_processor_voltage_volts",
+    "Processor input voltage in volts (vendor OEM field when present)",
+);
 pub const MEMORY_CAPACITY: (&str, &str) =
     ("redfish_memory_capacity_bytes", "Memory capacity in bytes");
 pub const MEMORY_BANDWIDTH: (&str, &str) = (

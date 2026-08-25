@@ -167,6 +167,50 @@ async fn full_scrape_cycle_with_mock_bmc() {
     assert!(out.contains("redfish_health_status"));
 }
 
+/// 处理器频率/电压指标：Dell（CurrentClockSpeedMhz/Volts）与浪潮
+/// （Public.FrequencyMHz）OEM 字段按真机探测路径采集；缺失字段不产出。
+#[tokio::test]
+async fn processor_frequency_voltage_metrics() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc, &["Systems"]);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, &["Processors"]);
+    expect_processor_payloads(&bmc);
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = redfish_exporter::collector::processors::collect_processors(bmc, &root, "bmc1")
+        .await
+        .unwrap();
+
+    let registry = prometheus::Registry::new();
+    redfish_exporter::metrics::register_into(&metrics, &registry).unwrap();
+    let out = redfish_exporter::metrics::encode(&registry);
+
+    assert!(
+        out.contains("redfish_processor_frequency_mhz{bmc=\"bmc1\",id=\"CPU1\",system=\"1\"} 2100"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "redfish_processor_max_frequency_mhz{bmc=\"bmc1\",id=\"CPU2\",system=\"1\"} 3400"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("redfish_processor_voltage_volts{bmc=\"bmc1\",id=\"CPU1\",system=\"1\"} 1.6"),
+        "{out}"
+    );
+    // CPU2 无 OEM 字段：不得产出频率/电压指标（最大频率来自标准字段，仍产出）。
+    assert!(
+        !out.contains("redfish_processor_voltage_volts{bmc=\"bmc1\",id=\"CPU2\""),
+        "{out}"
+    );
+    assert!(
+        !out.contains("redfish_processor_frequency_mhz{bmc=\"bmc1\",id=\"CPU2\""),
+        "{out}"
+    );
+}
+
 /// 测试 2：BMC 失败隔离。
 ///
 /// - 健康 BMC：完整流程成功（redfish_up=1）。

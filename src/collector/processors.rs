@@ -1,5 +1,8 @@
 use crate::collector::{push_health, push_info, status_labels};
-use crate::metrics::{Metric, PROCESSOR_POWER, PROCESSOR_TEMPERATURE, unbox_reading};
+use crate::metrics::{
+    Metric, PROCESSOR_FREQUENCY, PROCESSOR_MAX_FREQUENCY, PROCESSOR_POWER, PROCESSOR_TEMPERATURE,
+    PROCESSOR_VOLTAGE, unbox_reading,
+};
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
 use std::sync::Arc;
@@ -44,6 +47,38 @@ async fn collect_processor<B: Bmc>(
     let id = processor.id().to_string();
     let (health, state) = status_labels(raw.status.as_ref());
     push_health(out, bmc_name, "processor", &id, &health, &state);
+    // 频率：MaxSpeedMHz 为标准字段；当前频率取厂商 OEM 字段
+    // （Dell CurrentClockSpeedMhz / 浪潮 Public.FrequencyMHz），
+    // 缺失时该指标不产出（真机探测：Dell 2100 / 浪潮 2100）。
+    push_value(
+        out,
+        bmc_name,
+        system_id,
+        &id,
+        PROCESSOR_MAX_FREQUENCY,
+        raw.max_speed_mhz.flatten().map(|v| v as f64),
+    );
+    // OEM 扩展经 serde flatten 落在 base 链的 Item.oem（ProcessorSchema 无顶层 oem 字段）。
+    if let Some(oem) = raw.base.base.oem.as_ref() {
+        // 当前频率：Dell 优先，浪潮 Public 兜底（以真机探测路径为准）。
+        let freq = nv_redfish::oem::oem_value(oem, "Dell")
+            .and_then(|d| d.get("DellProcessor"))
+            .and_then(|p| p.get("CurrentClockSpeedMhz"))
+            .and_then(|v| v.as_f64())
+            .or_else(|| {
+                nv_redfish::oem::oem_value(oem, "Public")
+                    .and_then(|p| p.get("FrequencyMHz"))
+                    .and_then(|v| v.as_f64())
+            });
+        push_value(out, bmc_name, system_id, &id, PROCESSOR_FREQUENCY, freq);
+        // 电压：Dell DellProcessor.Volts 为字符串，解析失败则跳过（不报错、不产出）。
+        let volts = nv_redfish::oem::oem_value(oem, "Dell")
+            .and_then(|d| d.get("DellProcessor"))
+            .and_then(|p| p.get("Volts"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok());
+        push_value(out, bmc_name, system_id, &id, PROCESSOR_VOLTAGE, volts);
+    }
     if let Some(value) = raw.manufacturer.clone().flatten() {
         push_info(out, bmc_name, "manufacturer", &value);
     }
