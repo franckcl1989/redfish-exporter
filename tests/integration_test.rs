@@ -186,6 +186,8 @@ async fn processor_frequency_voltage_metrics() {
     redfish_exporter::metrics::register_into(&metrics, &registry).unwrap();
     let out = redfish_exporter::metrics::encode(&registry);
 
+    // 注意：register_into 对 label 名排序（bmc/id/system），TextEncoder 按 GaugeVec
+    // 声明的 label 顺序输出——与 brief 草图的 {bmc,system,id} 顺序不同，此处以实际顺序断言。
     assert!(
         out.contains("redfish_processor_frequency_mhz{bmc=\"bmc1\",id=\"CPU1\",system=\"1\"} 2100"),
         "{out}"

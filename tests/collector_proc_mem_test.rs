@@ -302,6 +302,78 @@ async fn processor_without_oem_fields_emits_no_frequency_voltage() {
 }
 
 #[tokio::test]
+async fn inspur_only_public_frequency_emits_frequency_metric() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, true, true);
+    expect_processor_collection(&bmc);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Systems/1/Processors/CPU1",
+        json!({
+            "@odata.id": "/redfish/v1/Systems/1/Processors/CPU1",
+            "Id": "CPU1", "Name": "CPU 1", "ProcessorType": "CPU",
+            "Status": { "Health": "OK", "State": "Enabled" },
+            "Manufacturer": "Inspur", "Model": "NF5280M6",
+            "MaxSpeedMHz": 3400,
+            "Oem": { "Public": { "FrequencyMHz": 2100 } },
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_processors(bmc, &root, "bmc1").await.unwrap();
+
+    // 浪潮真机路径：仅 Oem.Public.FrequencyMHz（无 Dell 块），走 or_else 兜底分支。
+    let frequency: Vec<_> = metrics
+        .iter()
+        .filter(|m| m.name == "redfish_processor_frequency_mhz")
+        .collect();
+    assert_eq!(frequency.len(), 1);
+    assert_eq!(frequency[0].value, 2100.0);
+    assert!(
+        !metrics
+            .iter()
+            .any(|m| m.name == "redfish_processor_voltage_volts")
+    );
+}
+
+#[tokio::test]
+async fn dell_frequency_takes_priority_over_public() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, true, true);
+    expect_processor_collection(&bmc);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Systems/1/Processors/CPU1",
+        json!({
+            "@odata.id": "/redfish/v1/Systems/1/Processors/CPU1",
+            "Id": "CPU1", "Name": "CPU 1", "ProcessorType": "CPU",
+            "Status": { "Health": "OK", "State": "Enabled" },
+            "Manufacturer": "Intel", "Model": "Xeon Gold 6338",
+            "MaxSpeedMHz": 3400,
+            "Oem": {
+                "Dell": {
+                    "DellProcessor": { "Volts": "1.6", "CurrentClockSpeedMhz": 2100 },
+                },
+                "Public": { "FrequencyMHz": 1900 },
+            },
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_processors(bmc, &root, "bmc1").await.unwrap();
+
+    // Dell 与 Public 并存且值不同：Dell CurrentClockSpeedMhz 优先（钉住 or_else 顺序）。
+    let frequency: Vec<_> = metrics
+        .iter()
+        .filter(|m| m.name == "redfish_processor_frequency_mhz")
+        .collect();
+    assert_eq!(frequency.len(), 1);
+    assert_eq!(frequency[0].value, 2100.0);
+}
+
+#[tokio::test]
 async fn collects_memory_metrics() {
     let bmc = Arc::new(Mock::default());
     expect_service_root(&bmc);
