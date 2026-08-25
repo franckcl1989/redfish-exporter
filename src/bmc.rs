@@ -26,7 +26,7 @@ pub struct BmcHandle {
     pub password: SecretString,
     pub auth: AuthMethod,
     /// Session 认证是否已成功建立（仅对 Session auth 有意义）。
-    /// Arc<AtomicBool>：跨轮共享，scraper 各轮任务都可读取/置位。
+    /// `Arc<AtomicBool>`：跨轮共享，scraper 各轮任务都可读取/置位。
     pub session_established: Arc<AtomicBool>,
 }
 

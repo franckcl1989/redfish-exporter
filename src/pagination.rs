@@ -133,6 +133,7 @@ pub async fn fetch_all_pages_with_limits<B: Bmc>(
             return Ok(out);
         };
         let Some(resolved) = resolve_next_link(&next, link) else {
+            tracing::warn!(url = %next, link, "pagination nextLink resolve failed, stopping");
             return Ok(out);
         };
         if !visited.insert(resolved.to_string()) {
