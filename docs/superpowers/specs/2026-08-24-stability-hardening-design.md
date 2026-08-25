@@ -73,11 +73,13 @@ stability:
 | 状态 | up | scrape_error resource | errors_total |
 |---|---|---|---|
 | Healthy 成功 | 1 | 无 | 不增 |
-| Healthy 失败 | 0 | 具体失败资源 | +1/轮 |
+| Healthy 失败 | 0 | 具体失败资源 | +1/失败资源 |
 | SessionDegraded（basic 成功） | 1 | `session-degraded`（持续提示） | 不增 |
-| SessionDegraded（basic 失败） | 0 | 具体失败资源 | +1/轮 |
+| SessionDegraded（basic 失败） | 0 | 具体失败资源 | +1/失败资源 |
 | Cooling（等待） | 0 | `cooldown` | 不增 |
-| Cooling（到期重试失败） | 0 | 具体失败资源 | +1/轮 |
+| Cooling（到期重试失败） | 0 | 具体失败资源 | +1/失败资源 |
+
+注：`redfish_scrape_errors_total` 按**失败资源数**累计（每失败资源 +1；整轮失败/超时按 1 个失败资源计）。ServiceRoot 404 跳过轮不发布失败资源、不计入 errors_total（既有设计，见 design.md 404 fast-skip）。
 
 ## 5. 验证层设计
 

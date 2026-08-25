@@ -120,7 +120,7 @@ Expected: 现状应全绿；任何非绿项直接列为 P0/P1 发现
 
 - [ ] **Step 1: 文档一致性核对**
 
-- docs/metrics.md 指标族清单 vs src/metrics.rs 常量：26 个指标族逐一核对（名称/help/labels/来源；本维新 8 族已在列——确认）
+- docs/metrics.md 指标名清单 vs src/metrics.rs 常量：53 个指标名逐一核对（名称/help/labels/来源；本维新 8 族已在列——确认）
 - config.example.yaml vs src/config.rs：每个配置节（web/stability/bmc/慢组）字段、默认值、注释与代码一致；示例文件可被加载（`cargo run -- --config config.example.yaml --dry-run` 如存在，否则解析级验证）
 - docs/design.md 各节（快照/调度/稳定性/资源/安全）与实现一致；docs/security.md 威胁模型与实现一致
 - README：安装/配置/运行/端点/指标清单与实现一致；告警示例（deploy/prometheus）与新指标族对应

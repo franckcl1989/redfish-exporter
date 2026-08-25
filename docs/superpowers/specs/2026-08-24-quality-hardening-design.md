@@ -32,7 +32,7 @@
 ### 3.1 审计面
 
 1. **代码面**：全量门禁（`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets`、`cargo doc --no-deps`、`cargo audit`、`cargo deny check`）全绿；关键路径复查——状态机（stability.rs）、锁序（registry.rs scratch/inner）、错误模型（Bmc 级/资源级隔离）、发布语义（scraper 三处发布路径）、编码等价（预编码缓存）、OEM 读取路径（oem_value/raw JSON 导航）、优雅停机路径。
-2. **文档一致性**：README / docs/design.md / docs/metrics.md / docs/security.md / config.example.yaml 与代码、冻结清单逐项核对（指标族 26 个全列、配置节全列、行为描述与实现一致、示例文件可直接运行）。
+2. **文档一致性**：README / docs/design.md / docs/metrics.md / docs/security.md / config.example.yaml 与代码、冻结清单逐项核对（53 个指标名全列、配置节全列、行为描述与实现一致、示例文件可直接运行）。
 3. **语义/命名一致性**：指标命名规则（`redfish_` 前缀 + 单位后缀 + 状态类 label 模式）跨六维自洽；label 惯例（bmc/system/storage/id/resource_type/state）统一；配置语义（web/stability/bmc 节）与文档一致；错误语义（up=0/failed_resources/cooldown/SessionDegraded）跨记录一致。
 4. **哲学统一**：社区资源优先（盘点手写实现 vs 社区 crate 覆盖；无手写编码器/存储替换——资源维 D1 既定）；YAGNI（无死代码、无未用依赖、无过度抽象）；诚实记录惯例（每验收数字有制品引用）；中文代码注释惯例；重复代码盘点（expect_full_round 复制等既有裁决项复核）。
 5. **发布资产**：LICENSE（Apache-2.0 全文）、CHANGELOG（0.1.0 变更）、README 完整性（安装/配置/运行/指标清单/告警示例）、Dockerfile 构建验证（Linux 机）、release.yml 审查（标签触发/资产上传/签名）、.dockerignore/.gitignore 合理性。

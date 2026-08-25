@@ -34,7 +34,7 @@ Values are pushed on every scrape; labels whose source field is absent on the BM
 |------------------------------------|------------------------------|----------------------------------------------------------|--------|
 | `redfish_up`                       | `bmc`                        | Whether the last scrape of this BMC succeeded            | per-BMC scrape result (`finalize_report`); forced to 0 on resource failure, round failure or timeout |
 | `redfish_scrape_duration_seconds`  | `bmc`                        | Duration of the last scrape of this BMC                  | round wall time (`finalize_report`) |
-| `redfish_scrape_error`             | `bmc`, `resource`            | Set to 1 when the last scrape of a resource failed       | one series per failed resource (`registry.rs`); `resource="timeout"` for deadline expiry, `resource="bmc"` for round failure |
+| `redfish_scrape_error`             | `bmc`, `resource`            | Set to 1 when the last scrape of a resource failed       | one series per failed resource (`registry.rs`); `resource="fast:timeout"`/`resource="slow:timeout"` for fast/slow-group deadline expiry, `resource="bmc"` for round failure (root-fetch errors whose message contains "timeout" are recorded as `resource="timeout"` — string-based discrimination, known backlog) |
 | `redfish_scrape_errors_total`      | `bmc`                        | Total number of failed resources across all scrape rounds | cumulative counter in `Snapshot` (`registry.rs`), incremented per failed resource and once per failed/timed-out round |
 | `redfish_build_info`               | `version`                    | Build information                                        | exporter crate version (`build_registry`, `registry.rs`), always `1.0` |
 | `redfish_health_status`            | `bmc`, `resource_type`, `id`, `health`, `state` | Health and state of a resource      | `Status.Health` + `Status.State` of any collected resource; always `1.0` |
@@ -131,7 +131,7 @@ Note: the `redfish_drive_io_*_errors_total` and `redfish_scrape_errors_total` me
 |---------------------------|----------------------------------------------|----------------------------------------------------------------|--------|
 | `redfish_event_log_entry` | `bmc`, `manager`, `service`, `severity`, `message`, `id` | Event log entry, value is the entry creation time as a Unix timestamp | `LogService.Entries` members (`logs.rs`), fetched with the pagination walker (`Members@odata.nextLink`); slow group |
 
-`severity` is the `LogEntry.Severity` debug name (`OK` / `Warning` / `Critical`, empty when absent, e.g. Inspur AuditLog); `message` is the `LogEntry.Message` text (empty when absent). Entries without a parseable `Created` timestamp are skipped. Series are stale-prone (log entries are not deleted by the exporter), so alerts should use `changes()`-style PromQL rather than `absent()`.
+`severity` is the `LogEntry.Severity` label mapping (`OK` / `Warning` / `Critical`, unknown variants exposed as `UnsupportedValue`; empty when absent, e.g. Inspur AuditLog); `message` is the `LogEntry.Message` text (empty when absent). Entries without a parseable `Created` timestamp are skipped. Series are stale-prone (log entries are not deleted by the exporter), so alerts should use `changes()`-style PromQL rather than `absent()`.
 
 ### BIOS
 
