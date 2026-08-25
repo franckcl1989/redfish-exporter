@@ -67,7 +67,11 @@ fn expect_storage(bmc: &Mock, with_drives: bool, with_volumes: bool) {
         "Id": "SATA1", "Name": "SATA 1",
         "Status": { "Health": "OK", "State": "Enabled" },
         "StorageControllers": [{
-            "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1/Controllers/0",
+            "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1#/StorageControllers/0",
+            "MemberId": "0",
+            "Model": "PERC H755 Adapter",
+            "FirmwareVersion": "52.16.1-4405",
+            "Status": { "Health": "OK", "State": "Enabled" },
         }],
     });
     if with_drives {
@@ -77,6 +81,11 @@ fn expect_storage(bmc: &Mock, with_drives: bool, with_volumes: bool) {
     if with_volumes {
         payload["Volumes"] = json!({ "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1/Volumes" });
     }
+    // 控制器明细经 raw JSON 重取同一 URI，故该 GET 期望注册两次（FIFO 顺序）。
+    bmc.expect(Expect::get(
+        "/redfish/v1/Systems/1/Storage/SATA1",
+        payload.clone(),
+    ));
     bmc.expect(Expect::get("/redfish/v1/Systems/1/Storage/SATA1", payload));
 }
 
@@ -275,6 +284,46 @@ async fn collects_drive_metrics() {
     assert_eq!(info_values.get("serial_number"), Some(&"SN123"));
     assert_eq!(info_values.get("revision"), Some(&"A1"));
     assert_eq!(info_values.get("name"), Some(&"Volume 1"));
+}
+
+#[tokio::test]
+async fn collects_storage_controller_metrics() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, true);
+    expect_storage_collection(&bmc);
+    expect_storage(&bmc, false, false);
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_storage(bmc, &root, "bmc1").await.unwrap();
+
+    let info: Vec<_> = metrics
+        .iter()
+        .filter(|m| m.name == "redfish_storage_controller_info")
+        .collect();
+    assert_eq!(info.len(), 1);
+    assert_eq!(info[0].value, 1.0);
+    let labels = labels_of(info[0]);
+    assert_eq!(labels.get("bmc"), Some(&"bmc1"));
+    assert_eq!(labels.get("system"), Some(&"1"));
+    assert_eq!(labels.get("storage"), Some(&"SATA1"));
+    assert_eq!(labels.get("id"), Some(&"0"));
+    assert_eq!(labels.get("model"), Some(&"PERC H755 Adapter"));
+    assert_eq!(labels.get("firmware_version"), Some(&"52.16.1-4405"));
+
+    let status: Vec<_> = metrics
+        .iter()
+        .filter(|m| m.name == "redfish_storage_controller_status")
+        .collect();
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].value, 1.0);
+    let labels = labels_of(status[0]);
+    assert_eq!(labels.get("bmc"), Some(&"bmc1"));
+    assert_eq!(labels.get("system"), Some(&"1"));
+    assert_eq!(labels.get("storage"), Some(&"SATA1"));
+    assert_eq!(labels.get("id"), Some(&"0"));
+    assert_eq!(labels.get("status"), Some(&"Enabled"));
 }
 
 #[tokio::test]

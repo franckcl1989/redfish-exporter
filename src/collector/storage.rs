@@ -1,9 +1,37 @@
 use crate::collector::{push_health, push_info, status_labels};
-use crate::metrics::{DRIVE_CAPACITY, Metric, VOLUME_CAPACITY};
+use crate::metrics::{
+    DRIVE_CAPACITY, Metric, STORAGE_CONTROLLER_INFO, STORAGE_CONTROLLER_STATUS, VOLUME_CAPACITY,
+};
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
+use nv_redfish::core::{EntityTypeRef, ODataETag, ODataId};
 use nv_redfish::schema::volume::Volume as VolumeSchema;
+use serde::Deserialize;
+use serde_json::Value;
 use std::sync::Arc;
+
+/// 存储资源原始负载：nv-redfish 0.15 的类型化 StorageSchema 将标准
+/// StorageControllers 数组仅编译为 Vec<ReferenceLeaf>（只保留 @odata.id，
+/// 内联 Model/FirmwareVersion/Status 被反序列化丢弃），故按 pagination.rs
+/// 的 Page 先例自定义 EntityTypeRef，重新 GET 同一资源 URI 从原始 JSON
+/// 提取控制器明细（路径以真机探测 Dell RAID.Slot.2-1 为准）。
+#[derive(Deserialize)]
+struct RawStoragePayload {
+    #[serde(rename = "@odata.id")]
+    id: ODataId,
+    #[serde(rename = "StorageControllers", default)]
+    storage_controllers: Option<Vec<Value>>,
+}
+
+impl EntityTypeRef for RawStoragePayload {
+    fn odata_id(&self) -> &ODataId {
+        &self.id
+    }
+
+    fn etag(&self) -> Option<&ODataETag> {
+        None
+    }
+}
 
 const DRIVE_LIFE_LEFT: (&str, &str) = (
     "redfish_drive_life_left_percent",
@@ -66,6 +94,19 @@ async fn collect_storage_controller<B: Bmc>(
     let raw = storage.raw();
     let storage_id = storage.id().to_string();
 
+    // 存储控制器明细（标准 StorageControllers 数组；真机仅 Dell 有，
+    // 浪潮存储子树固件损坏不产出）：类型化 schema 无该字段（仅 ReferenceLeaf），
+    // 经 raw JSON 重取同一 URI 导航。重取失败仅跳过控制器指标，
+    // 不阻止 drives/volumes 采集。
+    if raw
+        .storage_controllers
+        .as_ref()
+        .is_some_and(|v| !v.is_empty())
+        && let Ok(raw_payload) = bmc.get::<RawStoragePayload>(storage.odata_id()).await
+    {
+        collect_storage_controllers(bmc_name, system_id, &storage_id, &raw_payload, out);
+    }
+
     // drives 获取失败时跳过该子资源，不阻止 volumes 采集
     if let Ok(Some(drives)) = storage.drives().await {
         for drive in drives {
@@ -82,6 +123,56 @@ async fn collect_storage_controller<B: Bmc>(
                 continue;
             };
             collect_volume(bmc_name, system_id, &storage_id, &volume, out);
+        }
+    }
+}
+
+fn collect_storage_controllers(
+    bmc_name: &str,
+    system_id: &str,
+    storage_id: &str,
+    raw: &RawStoragePayload,
+    out: &mut Vec<Metric>,
+) {
+    let Some(controllers) = &raw.storage_controllers else {
+        return;
+    };
+    for (i, c) in controllers.iter().enumerate() {
+        // 成员标识：MemberId 优先（真机 Dell 用 MemberId），缺省用 Id，再缺省用下标。
+        let id = c
+            .get("MemberId")
+            .and_then(Value::as_str)
+            .or_else(|| c.get("Id").and_then(Value::as_str))
+            .map(str::to_owned)
+            .unwrap_or_else(|| i.to_string());
+        let model = c.get("Model").and_then(Value::as_str).map(str::to_owned);
+        let fw = c.get("FirmwareVersion").and_then(Value::as_str);
+        if let Some(m) = model {
+            out.push(
+                Metric::gauge(STORAGE_CONTROLLER_INFO.0, STORAGE_CONTROLLER_INFO.1)
+                    .label("bmc", bmc_name.to_string())
+                    .label("system", system_id.to_string())
+                    .label("storage", storage_id.to_string())
+                    .label("id", id.clone())
+                    .label("model", m)
+                    .label("firmware_version", fw.unwrap_or_default().to_string())
+                    .build(1.0),
+            );
+        }
+        if let Some(st) = c
+            .get("Status")
+            .and_then(|s| s.get("State"))
+            .and_then(Value::as_str)
+        {
+            out.push(
+                Metric::gauge(STORAGE_CONTROLLER_STATUS.0, STORAGE_CONTROLLER_STATUS.1)
+                    .label("bmc", bmc_name.to_string())
+                    .label("system", system_id.to_string())
+                    .label("storage", storage_id.to_string())
+                    .label("id", id)
+                    .label("status", st.to_string())
+                    .build(1.0),
+            );
         }
     }
 }

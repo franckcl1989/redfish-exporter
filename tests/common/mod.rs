@@ -280,15 +280,29 @@ pub fn expect_storage_payloads(bmc: &Mock) {
             "Members@odata.count": 1,
         }),
     ));
+    // 存储控制器明细经 raw JSON 重取同一 URI（nv-redfish 0.15 类型化 schema
+    // 丢弃 StorageControllers 内联字段），故该 GET 期望注册两次（FIFO 顺序）。
+    let storage_payload = json!({
+        "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1",
+        "Id": "SATA1", "Name": "SATA 1",
+        "Status": { "Health": "OK", "State": "Enabled" },
+        "StorageControllers": [{
+            "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1#/StorageControllers/0",
+            "MemberId": "0",
+            "Model": "PERC H755 Adapter",
+            "FirmwareVersion": "52.16.1-4405",
+            "Status": { "Health": "OK", "State": "Enabled" },
+        }],
+        "Drives": [{ "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1/Drives/HDD1" }],
+        "Volumes": { "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1/Volumes" },
+    });
     bmc.expect(Expect::get(
         "/redfish/v1/Systems/1/Storage/SATA1",
-        json!({
-            "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1",
-            "Id": "SATA1", "Name": "SATA 1",
-            "Status": { "Health": "OK", "State": "Enabled" },
-            "Drives": [{ "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1/Drives/HDD1" }],
-            "Volumes": { "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1/Volumes" },
-        }),
+        storage_payload.clone(),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/Systems/1/Storage/SATA1",
+        storage_payload,
     ));
     bmc.expect(Expect::get(
         "/redfish/v1/Systems/1/Storage/SATA1/Drives/HDD1",

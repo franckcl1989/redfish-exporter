@@ -95,6 +95,14 @@ pub const VOLUME_CAPACITY: (&str, &str) =
     ("redfish_volume_capacity_bytes", "Volume capacity in bytes");
 pub const DRIVE_CAPACITY: (&str, &str) =
     ("redfish_drive_capacity_bytes", "Drive capacity in bytes");
+pub const STORAGE_CONTROLLER_INFO: (&str, &str) = (
+    "redfish_storage_controller_info",
+    "Storage controller model and firmware information, 1 = present",
+);
+pub const STORAGE_CONTROLLER_STATUS: (&str, &str) = (
+    "redfish_storage_controller_status",
+    "Storage controller status, 1 = present with status label",
+);
 pub const LINK_STATUS: (&str, &str) = (
     "redfish_ethernet_interface_link_status",
     "Ethernet link status, 1 = up",

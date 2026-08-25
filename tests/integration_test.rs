@@ -213,6 +213,38 @@ async fn processor_frequency_voltage_metrics() {
     );
 }
 
+/// 存储控制器指标：标准 StorageControllers 数组（MemberId/Model/
+/// FirmwareVersion/Status.State，真机 Dell PERC 路径）经 raw JSON 导航采集；
+/// 无该数组的存储资源不产出。
+#[tokio::test]
+async fn storage_controller_metrics() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc, &["Systems"]);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, &["Storage"]);
+    expect_storage_payloads(&bmc);
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = redfish_exporter::collector::storage::collect_storage(bmc, &root, "bmc1")
+        .await
+        .unwrap();
+
+    let registry = prometheus::Registry::new();
+    redfish_exporter::metrics::register_into(&metrics, &registry).unwrap();
+    let out = redfish_exporter::metrics::encode(&registry);
+
+    // 注意：register_into 对 label 名排序，TextEncoder 按 GaugeVec 声明的
+    // label 顺序（字母序）输出——与 brief 草图的顺序不同，此处以实际顺序断言。
+    assert!(
+        out.contains("redfish_storage_controller_info{bmc=\"bmc1\",firmware_version=\"52.16.1-4405\",id=\"0\",model=\"PERC H755 Adapter\",storage=\"SATA1\",system=\"1\"} 1"),
+        "{out}"
+    );
+    assert!(
+        out.contains("redfish_storage_controller_status{bmc=\"bmc1\",id=\"0\",status=\"Enabled\",storage=\"SATA1\",system=\"1\"} 1"),
+        "{out}"
+    );
+}
+
 /// 测试 2：BMC 失败隔离。
 ///
 /// - 健康 BMC：完整流程成功（redfish_up=1）。
