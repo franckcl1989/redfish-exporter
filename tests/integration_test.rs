@@ -302,8 +302,9 @@ async fn indicator_led_metrics() {
             "Members": [
                 { "@odata.id": "/redfish/v1/Chassis/1" },
                 { "@odata.id": "/redfish/v1/Chassis/Enclosure.Internal.0-1" },
+                { "@odata.id": "/redfish/v1/Chassis/2" },
             ],
-            "Members@odata.count": 2,
+            "Members@odata.count": 3,
         }),
     ));
     bmc.expect(Expect::get(
@@ -321,6 +322,17 @@ async fn indicator_led_metrics() {
             "@odata.id": "/redfish/v1/Chassis/Enclosure.Internal.0-1",
             "Id": "Enclosure.Internal.0-1", "Name": "Enclosure Chassis",
             "ChassisType": "Enclosure",
+            "Status": { "Health": "OK", "State": "Enabled" },
+        }),
+    ));
+    // IndicatorLED 显式 null（Option<Option<_>>::flatten 的 null 分支）：
+    // 与字段缺失同样不得产出系列。
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/2",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis/2",
+            "Id": "2", "Name": "Chassis 2", "ChassisType": "RackMount",
+            "IndicatorLED": null,
             "Status": { "Health": "OK", "State": "Enabled" },
         }),
     ));
@@ -358,6 +370,11 @@ async fn indicator_led_metrics() {
     assert!(
         !out.contains("redfish_indicator_led{bmc=\"bmc1\",id=\"Enclosure.Internal.0-1\""),
         "无 IndicatorLED 的机箱不得产出: {out}"
+    );
+    // IndicatorLED 显式 null：同样不得产出（Option<Option<_>>::flatten null 分支）
+    assert!(
+        !out.contains("redfish_indicator_led{bmc=\"bmc1\",id=\"2\""),
+        "IndicatorLED=null 的机箱不得产出: {out}"
     );
 }
 

@@ -348,6 +348,45 @@ async fn drive_oem_life_left_null_emits_oem_only() {
 }
 
 #[tokio::test]
+async fn drive_oem_single_status_emits_with_empty_other() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, true);
+    expect_storage_collection(&bmc);
+    expect_storage(&bmc, true, false);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Systems/1/Storage/SATA1/Drives/HDD1",
+        json!({
+            "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1/Drives/HDD1",
+            "Id": "HDD1", "Name": "HDD 1",
+            "Status": { "Health": "OK", "State": "Enabled" },
+            // 任一非空门控（either-non-null）：仅 RaidStatus 无 PowerStatus
+            // 仍产出 drive_oem_status，缺失标签为空字符串。
+            "Oem": { "Dell": { "DellPhysicalDisk": {
+                "RaidStatus": "Online",
+            } } },
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_storage(bmc, &root, "bmc1").await.unwrap();
+
+    let oem: Vec<_> = metrics
+        .iter()
+        .filter(|m| m.name == "redfish_drive_oem_status")
+        .collect();
+    assert_eq!(oem.len(), 1);
+    let labels = labels_of(oem[0]);
+    assert_eq!(labels.get("raid_status"), Some(&"Online"));
+    assert_eq!(labels.get("power_status"), Some(&""));
+    assert!(
+        !metrics.iter().any(|m| m.name == "redfish_drive_info"),
+        "drive without WWN must not emit drive_info"
+    );
+}
+
+#[tokio::test]
 async fn collects_storage_controller_metrics() {
     let bmc = Arc::new(Mock::default());
     expect_service_root(&bmc);

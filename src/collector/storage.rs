@@ -213,11 +213,13 @@ async fn collect_drive<B: Bmc>(
         let raid = dell
             .get("RaidStatus")
             .and_then(|v| v.as_str())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .to_string();
         let power = dell
             .get("PowerStatus")
             .and_then(|v| v.as_str())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .to_string();
         if !raid.is_empty() || !power.is_empty() {
             out.push(
                 Metric::gauge(DRIVE_OEM_STATUS.0, DRIVE_OEM_STATUS.1)
@@ -225,8 +227,8 @@ async fn collect_drive<B: Bmc>(
                     .label("system", system_id.to_string())
                     .label("storage", storage_id.to_string())
                     .label("id", id.clone())
-                    .label("raid_status", raid.to_string())
-                    .label("power_status", power.to_string())
+                    .label("raid_status", raid)
+                    .label("power_status", power)
                     .build(1.0),
             );
         }
