@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-08-24
+## [0.1.0] - 2026-08-25
 
 ### Added
 
@@ -47,5 +47,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Probe NOT MET items (firmware/data limits, tracked in the function record): RAID battery, drive lifetime/PPID, CPU-level power, Inspur storage subtree (BMC returns HTTP 500).
 - quick-xml build-time advisories (RUSTSEC-2026-0194/0195) are whitelisted in `.cargo/audit.toml`; they do not enter the runtime binary and are tracked against the nv-redfish upstream.
 - gzip/streaming output and streaming response-size caps are backlog.
-- Soak ≥2h and real-machine long-run observation remain pre-production follow-ups.
+- Mock soak ≥2h completed (2026-08-25, 7214 rounds); real-machine 24–72h long-run observation remains a pre-production follow-up.
 - Grafana dashboard, Kubernetes manifests and alert rules in `deploy/` are examples and should be tuned per environment.

@@ -128,7 +128,7 @@ Expected: 现状应全绿；任何非绿项直接列为 P0/P1 发现
 
 - [ ] **Step 2: 语义/命名一致性核对**
 
-- 指标命名规则：`redfish_` 前缀 + 单位后缀（_watts/_percent/_seconds/_mhz/_volts/_bytes）跨 26 族自洽；状态类 label 模式（值恒 1 + label 携带状态）统一（health_status/indicator_led/controller_status/drive_oem_status）
+- 指标命名规则：`redfish_` 前缀 + 单位后缀（_watts/_percent/_seconds/_mhz/_volts/_bytes）跨全部指标族（26 族 / 53 个指标名）自洽；状态类 label 模式（值恒 1 + label 携带状态）统一（health_status/indicator_led/controller_status/drive_oem_status）
 - label 惯例：bmc/system/storage/id/resource_type/state 各族的 label 集合与顺序语义一致
 - 配置语义：web（listen/auth_token/tls）、stability（cooldown_failures/base/max）与冻结清单一致
 - 错误语义：up=0、failed_resources、cooldown 轮发布、SessionDegraded、errors_total 跨文档与代码一致
