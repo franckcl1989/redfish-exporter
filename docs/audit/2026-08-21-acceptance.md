@@ -1,7 +1,7 @@
 # 0.1.0 生产就绪验收报告
 
 日期：2026-08-21
-验收范围：两台真机（Dell PowerEdge R750 @10.10.90.70、浪潮 @10.10.90.80）+ 三个对标项目（idrac_exporter / fishymetrics / sapcc）+ 发布资产
+验收范围：两台真机（Dell PowerEdge R750 @<dell-bmc-host>、浪潮 @<inspur-bmc-host>）+ 三个对标项目（idrac_exporter / fishymetrics / sapcc）+ 发布资产
 验收方式：真机端到端实跑（新代码首次上真机）、故障演练、性能基准、依赖审计、发布流程核对
 
 ## 结论

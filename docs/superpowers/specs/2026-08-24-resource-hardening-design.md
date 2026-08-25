@@ -26,7 +26,7 @@
 
 ### 3.1 环境与制品
 
-- 环境：两台真机（Dell 10.10.90.70 / 浪潮 10.10.90.80）+ 本地 mock。
+- 环境：两台真机（Dell <dell-bmc-host> / 浪潮 <inspur-bmc-host>）+ 本地 mock。
 - 制品：`%TEMP%\opencode\redfish-resource-run\` 原始输出落盘（沿用性能维制品惯例），验收记录逐项引用文件路径。
 
 ### 3.2 内存轴

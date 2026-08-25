@@ -157,7 +157,7 @@ git commit -m "test: ignored mock-based resource benchmark (RSS per-BMC curve)"
 - 测量脚本（临时）：`%TEMP%\opencode\redfish-resource-run\measure-mem.ps1`、`measure-cpu.ps1`、`measure-conn.ps1`（执行期现场编写，不入库——性能维先例）
 
 **Interfaces:**
-- Consumes: spec §3 四轴定义；既有验收配置（两台真机 Dell 10.10.90.70 / 浪潮 10.10.90.80，scrape_interval=30s、slow_interval=120s，性能维真机测量同款）；性能维真机基线（验收记录 `docs/audit/2026-08-24-performance.md`：hot path curl p50 2.4/10.7ms、轮耗时 155.7s 等）
+- Consumes: spec §3 四轴定义；既有验收配置（两台真机 Dell <dell-bmc-host> / 浪潮 <inspur-bmc-host>，scrape_interval=30s、slow_interval=120s，性能维真机测量同款）；性能维真机基线（验收记录 `docs/audit/2026-08-24-performance.md`：hot path curl p50 2.4/10.7ms、轮耗时 155.7s 等）
 - Produces: 四轴实测数值（内存 WS/私有、CPU 三态、连接复用判定、每轮请求量）+ 落盘制品；供 Task 3/4 引用
 
 - [ ] **Step 1: 启动 exporter 并确认采集稳定**
@@ -188,7 +188,7 @@ git commit -m "test: ignored mock-based resource benchmark (RSS per-BMC curve)"
 
 - 轮次时间窗内按 BMC IP 过滤，每 5s 采样一次 ≥6 次：
   ```powershell
-  Get-NetTCPConnection -RemoteAddress 10.10.90.70,10.10.90.80 -ErrorAction SilentlyContinue | Group-Object RemoteAddress,State | Select-Object Name,Count
+  Get-NetTCPConnection -RemoteAddress <dell-bmc-host>,<inspur-bmc-host> -ErrorAction SilentlyContinue | Group-Object RemoteAddress,State | Select-Object Name,Count
   ```
 - 判定：采样间 Established 五元组（RemoteAddress+RemotePort）持续复用 → keepalive/池化；每轮新建（SynSent→Established 反复出现、RemotePort 变化）→ 未复用
 - 结论写入 `resource-summary.txt`（判定 + 置信度标注，spec §9）

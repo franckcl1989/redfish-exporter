@@ -6,7 +6,7 @@
 
 **Architecture:** 审计-修复闭环：先建仓推送（CI 自动开跑）+ 后台启动 soak 长跑，同时按审计面分批派发审计子代理；发现分级（P0/P1 必修、P2 裁决、P3 backlog；冻结语义改动报用户批准）；修复波统一实施 + 复审；最后收集 soak/CI 结果、回填稳定性记录、写验收记录与投产核对表。
 
-**Tech Stack:** Rust 1.90 / edition 2024、gh CLI（已登录 franckcl1989）、GitHub Actions、Linux 验证机 10.10.91.7（root）、PowerShell、既有测试基建。零新依赖。
+**Tech Stack:** Rust 1.90 / edition 2024、gh CLI（已登录 franckcl1989）、GitHub Actions、Linux 验证机 <linux-verify-host>（<user>）、PowerShell、既有测试基建。零新依赖。
 
 **Spec:** `docs/superpowers/specs/2026-08-24-quality-hardening-design.md`（计划依 spec 论证，执行者须先读 spec）
 
@@ -45,7 +45,7 @@ Start-Process powershell -ArgumentList "-NoProfile","-Command","cd C:\Users\fran
 
 - [ ] **Step 1: 全库凭据扫描**
 
-- 工作区 + git 全历史：`git log -p --all | Select-String -Pattern "password|passwd|token|secret|10\.10\.90\.(70|80)|EQ1q2w3e4r" -CaseSensitive:$false` 与工作区文件 grep（config.example.yaml 为示例文件无真实凭据——确认；%TEMP% 配置不入库——确认）
+- 工作区 + git 全历史：`git log -p --all | Select-String -Pattern "password|passwd|token|secret|<dell-bmc-host>|<inspur-bmc-host>|<ssh-password>" -CaseSensitive:$false` 与工作区文件 grep（config.example.yaml 为示例文件无真实凭据——确认；%TEMP% 配置不入库——确认）
 - 结论写入 `%TEMP%\opencode\redfish-quality-scan.txt` 与 SDD 报告；发现任何真实凭据 → 停止并报控制器
 
 - [ ] **Step 2: 建仓并关联**
@@ -227,7 +227,7 @@ git commit -m "docs: Apache-2.0 license, 0.1.0 changelog, README and release wor
 - 无代码改动（验证 + 佐证记录；如 CI 配置缺陷则修复提交）
 
 **Interfaces:**
-- Consumes: Task 1 的仓库 URL + run ID；Linux 验证机 10.10.91.7（root）
+- Consumes: Task 1 的仓库 URL + run ID；Linux 验证机 <linux-verify-host>（<user>）
 - Produces: CI 真跑结论 + Linux 手动 SIGTERM 佐证 + Docker 构建验证结论（SDD workspace 报告）
 
 - [ ] **Step 1: GitHub Actions 结果收集**
@@ -237,7 +237,7 @@ git commit -m "docs: Apache-2.0 license, 0.1.0 changelog, README and release wor
 
 - [ ] **Step 2: Linux 机连通性与工具链**
 
-- 连通性：`Test-NetConnection 10.10.91.7 -Port 22`；SSH 登录（密码认证；Windows 端可用 plink/ssh 交互——若子代理环境无法非交互输密码，如实记录并跳过手动佐证，以 Actions 结果为准）
+- 连通性：`Test-NetConnection <linux-verify-host> -Port 22`；SSH 登录（密码认证；Windows 端可用 plink/ssh 交互——若子代理环境无法非交互输密码，如实记录并跳过手动佐证，以 Actions 结果为准）
 - 工具链：`which docker rustc cargo`；无则按序尝试 docker（最省）→ rustup 安装（`curl https://sh.rustup.rs -sSf | sh -s -- -y`）→ 均不可用则如实记录
 - 环境不可用：降级记录（Actions 结果为准），不阻塞
 

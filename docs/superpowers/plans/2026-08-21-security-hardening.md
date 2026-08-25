@@ -1615,7 +1615,7 @@ Expected: 全绿（后续四维回归基线即此四文件 + integration/scraper
 
 - [ ] **Step 4: 真机回归（有条件）**
 
-按 `docs/audit/2026-08-21-acceptance.md` §1 配置（Dell 10.10.90.70 / 浪潮 10.10.90.80；注意新默认绑定需显式 `0.0.0.0` 或本机访问），跑 exporter 至少 2 轮：
+按 `docs/audit/2026-08-21-acceptance.md` §1 配置（Dell <dell-bmc-host> / 浪潮 <inspur-bmc-host>；注意新默认绑定需显式 `0.0.0.0` 或本机访问），跑 exporter 至少 2 轮：
 - 验证快组 up=1、指标产出与验收报告一致（重定向策略与 TLS 改动未破坏采集）
 - 开启 `web.auth_token` 冒烟：无 token 401、带 token 200
 Expected: 通过则记录；真机不可达则如实记录「未执行 + 原因」，标记为投产前遗留跟踪（与验收报告惯例一致）。

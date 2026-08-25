@@ -31,7 +31,7 @@
 
 ### 3.1 范围与环境
 
-- 两台真机（Dell 10.10.90.70 / 浪潮 10.10.90.80），只读 GET 探测（沿用审计探测组惯例；不 POST/PATCH/DELETE）。
+- 两台真机（Dell <dell-bmc-host> / 浪潮 <inspur-bmc-host>），只读 GET 探测（沿用审计探测组惯例；不 POST/PATCH/DELETE）。
 - 探测目标：
   1. ProcessorMetrics：Dell/浪潮 Systems/Processors/{id}/Metrics 的 Voltage（Volts）、PowerConsumedWatts、频率相关字段（如 TotalCores/CurrentSpeed 等按实际 schema 探测）
   2. Dell 存储 OEM：DellControllers（控制器型号/固件/状态）、ControllerBattery（RAID 电池状态）、DellPhysicalDisk 非寿命字段（PPID/WWN/RaidStatus/PowerStatus）

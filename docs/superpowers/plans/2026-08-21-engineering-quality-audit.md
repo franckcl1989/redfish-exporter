@@ -19,7 +19,7 @@
 - **工程纪律**：每任务结束 `cargo fmt --check`、`cargo clippy -- -D warnings`、`cargo test` 全绿；`#![forbid(unsafe_code)]` 保持。
 - **指标命名**：遵循 `docs/metrics.md` 现有约定（单位进名字、静态信息用 `redfish_info`、健康用 `redfish_health_status`）。
 - **审计产物路径**：`docs/audit/2026-08-21-bmc-audit.md`、`docs/audit/2026-08-21-gap-analysis.md`。
-- 真机地址：`https://10.10.90.70/`（Dell R750，用户 root）；`https://10.10.90.80/`（浪潮，用户 admin）。
+- 真机地址：`https://<dell-bmc-host>/`（Dell R750，用户 <user>）；`https://<inspur-bmc-host>/`（浪潮，用户 admin）。
 
 ---
 
@@ -40,7 +40,7 @@
 运行（PowerShell，凭据用环境变量，不落任何仓库文件）：
 ```powershell
 $env:AUDIT_DELL_PASS = '<REDACTED-PASSWORD>'; $env:AUDIT_INSPUR_PASS = '<REDACTED-PASSWORD>'
-$r = Invoke-WebRequest -Uri 'https://10.10.90.70/redfish/v1' -Headers @{Authorization='Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("root:$env:AUDIT_DELL_PASS"))} -SkipCertificateCheck -TimeoutSec 15
+$r = Invoke-WebRequest -Uri 'https://<dell-bmc-host>/redfish/v1' -Headers @{Authorization='Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("<user>:$env:AUDIT_DELL_PASS"))} -SkipCertificateCheck -TimeoutSec 15
 $r.StatusCode; $r.Content.Substring(0, [Math]::Min(300, $r.Content.Length))
 ```
 预期：Dell 返回 200 与 ServiceRoot JSON。浪潮同法（用户 admin）。若不通，停止并报告网络/凭据问题（先解决再继续）。
@@ -49,8 +49,8 @@ $r.StatusCode; $r.Content.Substring(0, [Math]::Min(300, $r.Content.Length))
 
 创建 `C:\Users\franck\AppData\Local\Temp\opencode\redfish-audit\creds.json`：
 ```json
-{"dells": {"host": "https://10.10.90.70", "user": "root", "pass": "<REDACTED-PASSWORD>"},
- "inspur": {"host": "https://10.10.90.80", "user": "admin", "pass": "<REDACTED-PASSWORD>"}}
+{"dells": {"host": "https://<dell-bmc-host>", "user": "<user>", "pass": "<REDACTED-PASSWORD>"},
+ "inspur": {"host": "https://<inspur-bmc-host>", "user": "admin", "pass": "<REDACTED-PASSWORD>"}}
 ```
 确认该路径不在 git 仓库内（`git status` 无新文件）。
 
@@ -542,13 +542,13 @@ scrape_timeout: "60s"
 request_timeout: "15s"
 bmcs:
   - name: dells
-    host: https://10.10.90.70
-    username: root
+    host: https://<dell-bmc-host>
+    username: <user>
     password: <REDACTED-PASSWORD>
     auth: session
     insecure_skip_verify: true
   - name: inspur
-    host: https://10.10.90.80
+    host: https://<inspur-bmc-host>
     username: admin
     password: <REDACTED-PASSWORD>
     auth: session
@@ -594,7 +594,7 @@ Get-Content 'C:\Users\franck\AppData\Local\Temp\opencode\redfish-audit\live-metr
 # 真机审计报告（Dell R750 / 浪潮）
 
 日期：2026-08-21
-范围：10.10.90.70（Dell R750, iDRAC）/ 10.10.90.80（浪潮）
+范围：<dell-bmc-host>（Dell R750, iDRAC）/ <inspur-bmc-host>（浪潮）
 方法：Python 探测矩阵 A–L + exporter 实跑交叉对比（见 spec 第 4 节）
 
 ## 1. API 基线摘要（每 BMC）

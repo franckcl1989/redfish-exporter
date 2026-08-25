@@ -27,7 +27,7 @@
 
 ## 性能证据
 
-真机运行：两台真机可达（Dell 10.10.90.70 / 浪潮 10.10.90.80）；沿用验收配置（session 认证、`scrape_interval=30s`、`scrape_timeout=120s`、`slow_interval=120s`；`listen_addr: 127.0.0.1:9417` 本机访问），release 二进制实跑 ≥5 轮后测量；`/metrics` 热延迟按 10 次连续请求取 p50。热延迟复测在同配置的第二次启动上进行（`perf2.out.log`：全量轮 155802ms、快组轮 46504 / 47308ms，与首轮运行一致）。
+真机运行：两台真机可达（Dell <dell-bmc-host> / 浪潮 <inspur-bmc-host>）；沿用验收配置（session 认证、`scrape_interval=30s`、`scrape_timeout=120s`、`slow_interval=120s`；`listen_addr: 127.0.0.1:9417` 本机访问），release 二进制实跑 ≥5 轮后测量；`/metrics` 热延迟按 10 次连续请求取 p50。热延迟复测在同配置的第二次启动上进行（`perf2.out.log`：全量轮 155802ms、快组轮 46504 / 47308ms，与首轮运行一致）。
 
 | 指标 | before（验收报告 §3） | after | 变化 |
 |---|---|---|---|

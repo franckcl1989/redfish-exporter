@@ -112,7 +112,7 @@
 
 ## 4. 真机探测矩阵（详细版）
 
-两台 BMC：`https://10.10.90.70/`（Dell R750, root）+ `https://10.10.90.80/`（浪潮, admin）。
+两台 BMC：`https://<dell-bmc-host>/`（Dell R750, <user>）+ `https://<inspur-bmc-host>/`（浪潮, admin）。
 工具：Python 3 标准库脚本（urllib+ssl+json），basic 认证，只读。快照存 `Temp\opencode\redfish-audit\<bmc-name>\`（gitignore，凭据不落盘不入库）。
 每项记录：HTTP 状态码、耗时 ms、关键头（OData-Version/ETag/Content-Type）、字段存在性、值、`@odata.nextLink` 出现与否、`Oem.*` 键清单。
 

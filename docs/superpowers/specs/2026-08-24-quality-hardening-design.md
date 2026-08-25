@@ -9,7 +9,7 @@
 
 | # | 决策点 | 结论 |
 |---|---|---|
-| D1 | CI 验证方式 | gh（已登录 franckcl1989）创建**公开**新仓库并关联 remote、推送全部历史；GitHub Actions 跑 SIGTERM 冒烟 job；Linux 验证机 10.10.91.7（root）手动佐证 |
+| D1 | CI 验证方式 | gh（已登录 franckcl1989）创建**公开**新仓库并关联 remote、推送全部历史；GitHub Actions 跑 SIGTERM 冒烟 job；Linux 验证机 <linux-verify-host>（<user>）手动佐证 |
 | D2 | 审计范围 | 全维度工程审计：代码门禁扩展 + 关键路径复查、文档一致性、语义/命名一致性、哲学统一、发布资产 |
 | D3 | 许可证 | Apache-2.0 |
 | D4 | soak 执行 | 本地 mock 跑满 ≥2h（240+ 轮）；真机不做长 soak（BMC 保护：2h×30s 轮 ≈ 24k 请求/BMC 冲击大） |
@@ -54,7 +54,7 @@
 ## 4. 验收标准（定义「完成」）
 
 1. **S1**：soak ≥2h 完成（≥240 轮，轮耗时/RSS/输出字节断言稳定）→ 回填 `docs/audit/2026-08-24-stability.md`（CONDITIONAL PASS 转定论；若失败则如实记 FAIL 并修复后重跑）。
-2. **S2**：GitHub 公开仓库建好并推送全部历史；CI SIGTERM 冒烟 job 真跑通过（Actions 绿）；Linux 机（10.10.91.7）手动 SIGTERM 优雅停机佐证（或如实记录环境不可用原因，以 Actions 结果为准）。
+2. **S2**：GitHub 公开仓库建好并推送全部历史；CI SIGTERM 冒烟 job 真跑通过（Actions 绿）；Linux 机（<linux-verify-host>）手动 SIGTERM 优雅停机佐证（或如实记录环境不可用原因，以 Actions 结果为准）。
 3. **S3**：全库审计完成——五个审计面发现清单 + 分级处置全部落地（P0/P1 全修并经审查；P2/P3 登记 backlog）；「无发现」面如实记录。
 4. **S4**：发布资产齐备——LICENSE（Apache-2.0）、CHANGELOG（0.1.0）、README 完整；Docker 构建验证通过（Linux 机，或如实记录）；release.yml 审查结论。
 5. **S5**：全维回归绿——六维全部测试 + perf/resource 基准 ±5% + audit/deny 全绿。

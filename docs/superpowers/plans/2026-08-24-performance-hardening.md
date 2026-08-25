@@ -463,7 +463,7 @@ git commit -m "test: ignored mock-based performance benchmark"
 
 - [ ] **Step 2: 真机对比测量（有条件）**
 
-两真机可达（10.10.90.70 Dell / 10.10.90.80 浪潮；stability 专项已确认 TCP 可达）：
+两真机可达（<dell-bmc-host> Dell / <inspur-bmc-host> 浪潮；stability 专项已确认 TCP 可达）：
 - 用既有验收配置（session、scrape_interval=30s、slow_interval=120s；新默认绑定需显式 `listen_addr: 0.0.0.0:9417` 或本机访问）启动优化后二进制
 - 采集 ≥2 轮后测量：`/metrics` 热延迟（连续 10 次请求取 p50，Invoke-WebRequest 计时）、全量轮耗时（日志 `scrape round complete` duration_ms）
 - 「before」基线引用验收报告 §3（热延迟 ~310ms、Dell 快组 ~3s/全量 ~11s、浪潮快组 44-48s）
