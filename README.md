@@ -7,7 +7,7 @@ A Prometheus exporter for Redfish BMCs, built on [nv-redfish](https://github.com
 - **Resource-level isolation**: a failing resource (e.g. a missing chassis collection) marks that BMC's scrape as failed without dropping the rest of the collected data.
 - **Fast/slow scheduling**: heavy collectors (storage, network, firmware, assembly, event logs, BIOS) run at most once per `slow_interval` with last-good caching; light collectors run every round.
 - **Session management**: `basic` or `session` auth per BMC, automatic 401 re-login, basic-auth fallback, exponential-backoff cooldown for failing BMCs, server-side session cleanup on shutdown.
-- **Defensive scraping**: event-log pagination with loop/size defenses, per-request and per-round timeouts, per-BMC deadline isolation.
+- **Defensive scraping**: event-log pagination with loop/size defenses, per-request timeouts, and per fast/slow-group scrape deadlines (`fast:timeout` / `slow:timeout` on deadline expiry).
 
 ## Quick start
 
@@ -98,6 +98,10 @@ The full reference (every metric, its labels, help text and source Redfish resou
 | `redfish_ethernet_interface_*`, `redfish_pcie_device_*` | Network metrics             |
 | `redfish_event_log_entry`                     | Event log entries (timestamp = creation time) |
 | `redfish_bios_attribute`, `redfish_bios_attribute_info`, `redfish_bios_pending_changes` | BIOS attributes and pending settings |
+
+Hardening additions (probe-gated on vendor OEM fields): `redfish_processor_frequency_mhz`, `redfish_processor_max_frequency_mhz`, `redfish_processor_voltage_volts`, `redfish_storage_controller_info`, `redfish_storage_controller_status`, `redfish_drive_info`, `redfish_drive_oem_status`, `redfish_indicator_led`.
+
+The table above is an overview only — [`docs/metrics.md`](docs/metrics.md) is the authoritative full catalog (53 metric names in 0.1.0, every metric with labels, help text and source Redfish resource).
 
 ## Alerting
 

@@ -5,15 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-08-25
+## [0.1.0] - 2026-08-24
 
 ### Added
 
 - **Initial implementation** — multi-BMC Prometheus exporter for Redfish BMCs built on [nv-redfish](https://github.com/nickel-org/nv-redfish) 0.15.1:
   - Periodic scraping with a per-BMC atomic snapshot cache; `/metrics` serves the last good snapshot with zero live encoding.
   - Resource-level and BMC-level failure isolation (`redfish_up`, `redfish_scrape_error`, cumulative `redfish_scrape_errors_total`).
-  - 18 original metric families: health/status, inventory info, sensors and thresholds, chassis power (consumption stats, PSU details, power state), processors, memory (capacity, bandwidth, ECC alarm trips), drives/volumes, network interfaces and PCIe devices, event logs, BIOS attributes.
-  - Fast/slow scheduling (`slow_interval` with last-good caching) and a per-BMC scrape deadline.
+  - 18 original metric families at acceptance: up, scrape duration/error, health status, inventory info, sensor readings and the four sensor thresholds, chassis power consumption and power state, memory capacity, drive capacity and predictive failure, volume capacity, Ethernet link status and speed (`docs/audit/2026-08-21-bmc-audit.md` §2.2). The hardened 0.1.0 exports 53 metric names in total — the full catalog is `docs/metrics.md`.
+  - Fast/slow scheduling (`slow_interval` with last-good caching) and per fast/slow-group scrape deadlines (`fast:timeout` / `slow:timeout`).
   - Session management: session authentication, automatic 401 re-login, basic-auth fallback, server-side session cleanup on shutdown.
   - Event-log pagination walker (both `@odata.nextLink` and `Members@odata.nextLink` variants) with loop, page-size and member-count defenses.
   - Operations endpoints `/healthz`, `/info`, `/discover`, `/reload`.
@@ -36,9 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Benchmark comparison against idrac_exporter, fishymetrics and sapcc.
 - **Function hardening** (docs/audit/2026-08-24-function.md):
   - 8 new metric families, probe-gated on real hardware (Dell iDRAC / Inspur): processor current/max frequency and voltage, storage controller info and status, drive vendor identifier and OEM status, system/chassis indicator LED.
-  - Metrics reference updated to the full 26-family catalog (`docs/metrics.md`).
-- **Quality hardening** (docs/audit/2026-08-24-quality.md):
-  - Six-dimension acceptance records under `docs/audit/`, release assets: Apache-2.0 `LICENSE`, this changelog, README completeness pass, release workflow review.
+  - Metrics reference updated to the full catalog of 53 metric names (`docs/metrics.md`).
+- **Quality hardening** (`docs/audit/2026-08-24-quality.md`, produced by this quality pass):
+  - Release assets: Apache-2.0 `LICENSE`, this changelog, README completeness pass, release workflow review; six-dimension acceptance records under `docs/audit/`.
 
 ### Known limitations / backlog
 
