@@ -14,11 +14,17 @@ Values are pushed on every scrape; labels whose source field is absent on the BM
 | `manager`      | Manager resource id                                             |
 | `service`      | LogService resource id                                          |
 | `attribute`    | BIOS attribute name                                             |
-| `id`           | Resource id of the reported entity (processor, memory module, drive, volume, ethernet interface, PCIe device, log entry, power supply) |
+| `id`           | Resource id of the reported entity (processor, memory module, drive, volume, ethernet interface, PCIe device, log entry, power supply, storage controller, system/chassis LED) |
 | `storage`      | Storage (storage controller) resource id                        |
-| `resource_type`| Redfish resource type reported by `redfish_health_status`      |
+| `resource_type`| Redfish resource type reported by `redfish_health_status` / `redfish_indicator_led` (`system` / `chassis`) |
 | `health`       | `OK` / `Warning` / `Critical` / `UnsupportedValue` / `unknown` |
 | `state`        | Resource state (e.g. `Enabled`) / `unknown`                    |
+| `status`       | Storage controller state (`StorageControllers[].Status.State`) |
+| `model`        | Storage controller model name                                  |
+| `firmware_version` | Storage controller firmware version                        |
+| `wwn`          | Drive vendor identifier (Dell `DellPhysicalDisk.WWN`)          |
+| `raid_status`  | Drive vendor OEM RAID status (Dell `DellPhysicalDisk.RaidStatus`) |
+| `power_status` | Drive vendor OEM power status (Dell `DellPhysicalDisk.PowerStatus`) |
 
 ## A. Implemented metrics
 
@@ -71,6 +77,9 @@ Note: PSU metrics are read from the legacy Power document (embedded `PowerSuppli
 | `redfish_processor_temperature_celsius` | `bmc`, `system`, `id` | Processor temperature in Celsius                  | `ProcessorMetrics.temperature_celsius` |
 | `redfish_processor_power_watts`       | `bmc`, `system`, `id` | Processor power in watts                          | `ProcessorMetrics.consumed_power_watt` |
 | `redfish_processor_bandwidth_percent` | `bmc`, `system`, `id` | Processor bandwidth utilization percentage        | `ProcessorMetrics.bandwidth_percent` |
+| `redfish_processor_frequency_mhz`     | `bmc`, `system`, `id` | Current operating frequency of the processor in MHz | `Oem.Dell.DellProcessor.CurrentClockSpeedMhz` (Dell) / `Oem.Public.FrequencyMHz` (Inspur); series emitted only when the vendor field is present |
+| `redfish_processor_max_frequency_mhz` | `bmc`, `system`, `id` | Maximum rated frequency of the processor in MHz   | standard `MaxSpeedMHz` |
+| `redfish_processor_voltage_volts`     | `bmc`, `system`, `id` | Processor input voltage in volts (vendor OEM field when present) | `Oem.Dell.DellProcessor.Volts` (Dell, string value parsed to float); series emitted only when the field is present and numeric |
 
 ### Memory
 
@@ -93,6 +102,10 @@ Note: PSU metrics are read from the legacy Power document (embedded `PowerSuppli
 | `redfish_drive_io_read_uncorrectable_errors_total` | `bmc`, `system`, `storage`, `id`| Lifetime number of uncorrectable read errors reported by the drive    | `DriveMetrics.uncorrectable_io_read_error_count` |
 | `redfish_drive_io_write_uncorrectable_errors_total`| `bmc`, `system`, `storage`, `id`| Lifetime number of uncorrectable write errors reported by the drive   | `DriveMetrics.uncorrectable_io_write_error_count` |
 | `redfish_volume_capacity_bytes`              | `bmc`, `system`, `storage`, `id`| Volume capacity in bytes                                                      | `Volume.capacity_bytes` |
+| `redfish_storage_controller_info`            | `bmc`, `system`, `storage`, `id`, `model`, `firmware_version` | Storage controller model and firmware information, 1 = present | `StorageControllers[]` `Model` / `FirmwareVersion` (standard field; Dell only on probed machines); series emitted only when `Model` is present |
+| `redfish_storage_controller_status`          | `bmc`, `system`, `storage`, `id`, `status` | Storage controller status, 1 = present with status label | `StorageControllers[].Status.State` |
+| `redfish_drive_info`                         | `bmc`, `system`, `storage`, `id`, `wwn` | Drive vendor identifier information, 1 = present | `Oem.Dell.DellPhysicalDisk.WWN` (Dell only); series emitted only when the field is present |
+| `redfish_drive_oem_status`                   | `bmc`, `system`, `storage`, `id`, `raid_status`, `power_status` | Drive vendor OEM status, 1 = present with status labels | `Oem.Dell.DellPhysicalDisk.RaidStatus` / `PowerStatus` (Dell only); emitted when at least one of the two is present |
 
 Note: the `redfish_drive_io_*_errors_total` and `redfish_scrape_errors_total` metrics follow counter naming conventions (`_total` suffix) but are registered as **Gauge** carrying the last scraped (or cumulative) value, consistent with the snapshot-cache design.
 
@@ -110,6 +123,7 @@ Note: the `redfish_drive_io_*_errors_total` and `redfish_scrape_errors_total` me
 | Metric            | Labels          | Help text from code                | Source |
 |-------------------|-----------------|------------------------------------|--------|
 | `redfish_power_state` | `bmc`, `system` | Power state of a system, 1 = On  | `System.power_state`; series emitted only when the state is `On` |
+| `redfish_indicator_led` | `bmc`, `resource_type`, `id`, `state` | Indicator LED state, 1 = present with state label | `IndicatorLED` of Systems (`resource_type="system"`) and Chassis (`resource_type="chassis"`); series emitted only when the field is present |
 
 ### Event log
 
