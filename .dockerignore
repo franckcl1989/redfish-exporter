@@ -2,6 +2,7 @@ target
 .git
 .superpowers
 .worktrees
+config.yaml
 docs
 tests
 deploy

@@ -11,6 +11,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Verify (fmt, clippy, tests)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-targets
+      - name: Check tag matches Cargo.toml version
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          grep -q "^version = \"$VERSION\"" Cargo.toml || {
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version"; exit 1; }
       - name: Build static musl binary
         run: |
           docker run --rm -v "$PWD":/app -w /app rust:1.90.0-alpine \
@@ -25,7 +38,8 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           cd target/x86_64-unknown-linux-musl/release
-          tar czf redfish-exporter-${VERSION}-linux-amd64.tar.gz redfish-exporter
+          cp "$GITHUB_WORKSPACE/LICENSE" .
+          tar czf redfish-exporter-${VERSION}-linux-amd64.tar.gz redfish-exporter LICENSE
           sha256sum redfish-exporter-${VERSION}-linux-amd64.tar.gz > SHA256SUMS
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

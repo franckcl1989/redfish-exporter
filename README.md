@@ -3,8 +3,11 @@
 A Prometheus exporter for Redfish BMCs, built on [nv-redfish](https://github.com/nickel-org/nv-redfish) 0.15.1.
 
 - **Multi-BMC**: scrape any number of BMCs from a single process.
-- **Periodic scrape + snapshot cache**: every BMC is scraped on a fixed interval; the last successful snapshot per BMC is cached and served atomically from `GET /metrics`.
+- **Periodic scrape + snapshot cache**: every BMC is scraped on a fixed interval; the last successful snapshot per BMC is cached and served atomically from `GET /metrics` (pre-encoded, zero live encoding on the hot path).
 - **Resource-level isolation**: a failing resource (e.g. a missing chassis collection) marks that BMC's scrape as failed without dropping the rest of the collected data.
+- **Fast/slow scheduling**: heavy collectors (storage, network, firmware, assembly, event logs, BIOS) run at most once per `slow_interval` with last-good caching; light collectors run every round.
+- **Session management**: `basic` or `session` auth per BMC, automatic 401 re-login, basic-auth fallback, exponential-backoff cooldown for failing BMCs, server-side session cleanup on shutdown.
+- **Defensive scraping**: event-log pagination with loop/size defenses, per-request and per-round timeouts, per-BMC deadline isolation.
 
 ## Quick start
 
@@ -13,6 +16,24 @@ cargo run --release -- -c config.example.yaml
 ```
 
 Container deployment is covered by the examples in [`deploy/kubernetes/`](deploy/kubernetes/) (image placeholder `ghcr.io/your-org/redfish-exporter:0.1.0`).
+
+## Installation
+
+From source (requires Rust 1.90+):
+
+```bash
+cargo install --path .
+redfish-exporter -c config.example.yaml
+```
+
+Docker (static musl build, distroless non-root image):
+
+```bash
+docker build -t redfish-exporter:0.1.0 .
+docker run --rm -p 9417:9417 -v "$(pwd)/config.yaml:/config.yaml:ro" redfish-exporter:0.1.0 -c /config.yaml
+```
+
+Note: `listen_addr` defaults to `127.0.0.1:9417` inside the container too — bind `0.0.0.0` explicitly (see `config.example.yaml`) so the published port is reachable from outside.
 
 Endpoints:
 
@@ -82,6 +103,8 @@ The full reference (every metric, its labels, help text and source Redfish resou
 
 Example Prometheus alert rules are provided in [`deploy/prometheus/redfish-alerts.yml`](deploy/prometheus/redfish-alerts.yml) (BMC unreachable, scrape errors, sensor thresholds, drive predictive failure, link down).
 
+A Grafana dashboard for the exporter is provided in [`deploy/grafana/redfish-dashboard.json`](deploy/grafana/redfish-dashboard.json) (import via Grafana UI or provisioning), and a Prometheus `ServiceMonitor` for the Prometheus operator ships in [`deploy/kubernetes/service-monitor.yaml`](deploy/kubernetes/service-monitor.yaml).
+
 ## Security
 
 - **Inbound hardening (optional, per docs/security.md)**: bearer-token auth on all endpoints (constant-time compare, `web.auth_token` / `web.auth_token_file`, >= 16 chars) and server-side TLS via rustls (`web.tls_cert_file` + `web.tls_key_file`). `listen_addr` defaults to `127.0.0.1:9417` — remote scraping requires an explicit `0.0.0.0` bind plus auth/TLS per the baseline matrix.
@@ -101,4 +124,8 @@ cargo test
 
 ## License
 
-Apache-2.0
+Licensed under the Apache License, Version 2.0 ([LICENSE](LICENSE)).
+
+## Acknowledgements
+
+Built on [nv-redfish](https://github.com/nickel-org/nv-redfish) 0.15.1 — a Redfish client library for Rust. This project would not exist without it.
