@@ -4,41 +4,106 @@ on:
     branches: [master]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   lint-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.90.0
           components: clippy, rustfmt
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all-targets
-      - run: cargo doc --no-deps
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-targets --all-features
+      - run: cargo doc --locked --no-deps --all-features
+      - name: Validate GitHub Actions and shipped observability assets
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+          docker run --rm --entrypoint /bin/promtool -v "$PWD:/workspace:ro" \
+            prom/prometheus:v3.13.2@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69 \
+            check rules /workspace/deploy/prometheus/redfish-alerts.yml
+          python3 -m json.tool deploy/grafana/redfish-dashboard.json >/dev/null
+      - name: Release-mode performance and resource guards
+        run: |
+          cargo test --locked --profile release-gates --test perf_test -- --ignored --nocapture
+          cargo test --locked --profile release-gates --test resource_test -- --ignored --nocapture
+      - name: Short soak regression
+        env:
+          SOAK_SECS: "15"
+        run: cargo test --locked --profile release-gates --test soak_test -- --ignored --nocapture
   audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Audit dependencies
         # 白名单见 .cargo/audit.toml（quick-xml 构建期依赖，跟踪 nv-redfish 上游）
         run: cargo audit
       - name: Deny policy checks
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
+  container-smoke:
+    needs: lint-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Build production container
+        run: docker build --tag redfish-exporter:ci .
+      - name: Exercise probes, metrics, and graceful container shutdown
+        run: |
+          set -euo pipefail
+          container="redfish-exporter-ci-${GITHUB_RUN_ID}"
+          cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          cat > /tmp/container-smoke.yaml <<'EOF'
+          listen_addr: "0.0.0.0:9417"
+          scrape_interval: "60s"
+          scrape_timeout: "5s"
+          request_timeout: "2s"
+          bmcs:
+            - name: unreachable
+              host: http://127.0.0.1:1
+              username: u
+              password: "p"
+          EOF
+          docker run --detach --name "$container" \
+            --publish 127.0.0.1:19418:9417 \
+            --mount type=bind,src=/tmp/container-smoke.yaml,dst=/config.yaml,readonly \
+            redfish-exporter:ci -c /config.yaml
+          for _ in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:19418/healthz && break
+            sleep 1
+          done
+          test "$(curl --fail --silent http://127.0.0.1:19418/healthz)" = "ok"
+          for _ in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:19418/readyz >/dev/null; then break; fi
+            sleep 1
+          done
+          test "$(curl --fail --silent http://127.0.0.1:19418/readyz)" = "ready"
+          curl --fail --silent http://127.0.0.1:19418/metrics \
+            | grep --fixed-strings 'redfish_up{bmc="unreachable"} 0'
+          docker stop --time 35 "$container" >/dev/null
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$container")" -eq 0
+          docker logs "$container" 2>&1 | grep --fixed-strings 'shutdown complete'
   graceful-shutdown-smoke:
     runs-on: ubuntu-latest
     # 超时护栏（spec §9）：整个 job 10 分钟上限，防止挂死进程拖垮 CI。
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.90.0
       - name: Build
-        run: cargo build
+        run: cargo build --locked
       - name: SIGTERM graceful shutdown smoke
         run: |
           set -euo pipefail

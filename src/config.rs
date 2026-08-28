@@ -63,6 +63,42 @@ pub struct StabilityConfig {
     pub cooldown_max: Duration,
 }
 
+/// High-cardinality collectors are disabled by default. Operators may opt in,
+/// but the limits remain bounded so a malformed or very large BMC inventory
+/// cannot create an unbounded Prometheus snapshot.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CollectorsConfig {
+    pub event_logs: bool,
+    pub event_log_limit: usize,
+    pub bios_attributes: bool,
+    pub bios_attribute_limit: usize,
+}
+
+pub const MAX_EVENT_LOG_LIMIT: usize = 5_000;
+pub const MAX_BIOS_ATTRIBUTE_LIMIT: usize = 10_000;
+
+impl Default for CollectorsConfig {
+    fn default() -> Self {
+        Self {
+            event_logs: false,
+            event_log_limit: 500,
+            bios_attributes: false,
+            bios_attribute_limit: 10_000,
+        }
+    }
+}
+
+impl CollectorsConfig {
+    pub fn all_enabled() -> Self {
+        Self {
+            event_logs: true,
+            bios_attributes: true,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub listen_addr: SocketAddr,
@@ -73,6 +109,7 @@ pub struct Config {
     pub bmcs: Vec<BmcConfig>,
     pub web: WebConfig,
     pub stability: StabilityConfig,
+    pub collectors: CollectorsConfig,
 }
 
 #[derive(Debug, Error)]
@@ -86,10 +123,12 @@ pub enum ConfigError {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawBmcConfig {
     name: String,
     host: String,
     username: String,
+    #[serde(default)]
     password: String,
     #[serde(default)]
     auth: AuthMethod,
@@ -100,6 +139,7 @@ struct RawBmcConfig {
 }
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawWebConfig {
     auth_token: Option<String>,
     auth_token_file: Option<PathBuf>,
@@ -108,6 +148,7 @@ struct RawWebConfig {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawStabilityConfig {
     #[serde(default = "default_cooldown_failures")]
     cooldown_failures: u32,
@@ -146,6 +187,7 @@ fn default_cooldown_max() -> Duration {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default = "default_listen_addr")]
     listen_addr: String,
@@ -175,6 +217,8 @@ struct RawConfig {
     web: RawWebConfig,
     #[serde(default)]
     stability: RawStabilityConfig,
+    #[serde(default)]
+    collectors: CollectorsConfig,
 }
 
 fn default_listen_addr() -> String {
@@ -225,7 +269,7 @@ pub fn env_var_name(name: &str) -> String {
 }
 
 /// 从原始 host 字符串剥离 userinfo（`scheme://user:pass@host` → `scheme://host`），
-/// 供错误消息使用：凭据绝不允许回显到启动日志或 /reload 的 400 响应体。
+/// 供错误消息使用：凭据绝不允许回显到启动日志或配置校验错误中。
 /// 仅在 authority 段（首个 `/`、`?` 或 `#` 之前）内查找 `@`，路径/查询中的 `@` 不受影响。
 fn redact_userinfo(raw: &str) -> String {
     let host_start = raw.find("://").map_or(0, |i| i + 3);
@@ -252,7 +296,9 @@ pub fn load_config_with_env(
     env_lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<Config, ConfigError> {
     let mut raw: RawConfig = {
-        let text = std::fs::read_to_string(path)?;
+        // The source buffer itself contains every YAML password/token. Zeroize it
+        // after deserialization instead of leaving a dropped String allocation behind.
+        let text = Zeroizing::new(std::fs::read_to_string(path)?);
         serde_yaml_ng::from_str(&text)?
     };
     let mut names = std::collections::HashSet::new();
@@ -283,15 +329,39 @@ pub fn load_config_with_env(
                 redact_userinfo(&b.host)
             )));
         }
+        if host.host_str().is_none() {
+            return Err(ConfigError::Invalid(format!(
+                "host '{}': host name or IP address is required",
+                redact_userinfo(&b.host)
+            )));
+        }
         if !host.username().is_empty() || host.password().is_some() {
             return Err(ConfigError::Invalid(format!(
                 "host '{}': credentials in URL are not allowed; use the username/password fields",
                 redact_userinfo(&b.host)
             )));
         }
-        if b.password.is_empty() {
+        if host.query().is_some() || host.fragment().is_some() {
             return Err(ConfigError::Invalid(format!(
-                "bmc '{}': password must not be empty",
+                "host '{}': query strings and fragments are not allowed in a BMC base URL",
+                redact_userinfo(&b.host)
+            )));
+        }
+        if host.path() != "/" {
+            return Err(ConfigError::Invalid(format!(
+                "host '{}': BMC base URL must not contain a path",
+                redact_userinfo(&b.host)
+            )));
+        }
+        if host.port() == Some(0) {
+            return Err(ConfigError::Invalid(format!(
+                "host '{}': port must be greater than zero",
+                redact_userinfo(&b.host)
+            )));
+        }
+        if b.username.trim().is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "bmc '{}': username must not be empty",
                 b.name
             )));
         }
@@ -313,6 +383,24 @@ pub fn load_config_with_env(
             }
             password.zeroize();
             password = env_pw;
+        }
+        if password.is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "bmc '{}': password must be set in config or REDFISH_EXPORTER_PASSWORD_{env_name}",
+                b.name
+            )));
+        }
+        if host.scheme() == "http" && (b.insecure_skip_verify || b.ca_cert_file.is_some()) {
+            return Err(ConfigError::Invalid(format!(
+                "bmc '{}': TLS options require an https host",
+                b.name
+            )));
+        }
+        if b.insecure_skip_verify && b.ca_cert_file.is_some() {
+            return Err(ConfigError::Invalid(format!(
+                "bmc '{}': insecure_skip_verify and ca_cert_file are mutually exclusive",
+                b.name
+            )));
         }
         bmcs.push(BmcConfig {
             name: b.name,
@@ -361,6 +449,16 @@ pub fn load_config_with_env(
             "stability: cooldown_max must be >= cooldown_base".into(),
         ));
     }
+    if !(1..=MAX_EVENT_LOG_LIMIT).contains(&raw.collectors.event_log_limit) {
+        return Err(ConfigError::Invalid(format!(
+            "collectors.event_log_limit must be between 1 and {MAX_EVENT_LOG_LIMIT}"
+        )));
+    }
+    if !(1..=MAX_BIOS_ATTRIBUTE_LIMIT).contains(&raw.collectors.bios_attribute_limit) {
+        return Err(ConfigError::Invalid(format!(
+            "collectors.bios_attribute_limit must be between 1 and {MAX_BIOS_ATTRIBUTE_LIMIT}"
+        )));
+    }
     Ok(Config {
         listen_addr,
         scrape_interval: raw.scrape_interval,
@@ -374,6 +472,7 @@ pub fn load_config_with_env(
             cooldown_base: raw.stability.cooldown_base,
             cooldown_max: raw.stability.cooldown_max,
         },
+        collectors: raw.collectors,
     })
 }
 
@@ -390,21 +489,12 @@ fn build_web_config(raw: &mut RawWebConfig) -> Result<WebConfig, ConfigError> {
     }
     let auth_token = if let Some(t) = raw.auth_token.take() {
         let t = Zeroizing::new(t);
-        if t.len() < 16 {
-            return Err(ConfigError::Invalid(
-                "web.auth_token must be at least 16 characters".into(),
-            ));
-        }
+        validate_auth_token(&t, "web.auth_token")?;
         Some(SecretString::new((*t).clone()))
     } else if let Some(path) = raw.auth_token_file.take() {
         let content = Zeroizing::new(std::fs::read_to_string(&path).map_err(ConfigError::Io)?);
         let token = Zeroizing::new(content.trim().to_string());
-        if token.len() < 16 {
-            return Err(ConfigError::Invalid(format!(
-                "web.auth_token_file '{}': token must be at least 16 characters",
-                path.display()
-            )));
-        }
+        validate_auth_token(&token, &format!("web.auth_token_file '{}'", path.display()))?;
         Some(SecretString::new((*token).clone()))
     } else {
         None
@@ -423,6 +513,24 @@ fn build_web_config(raw: &mut RawWebConfig) -> Result<WebConfig, ConfigError> {
         tls_cert_file: tls.0,
         tls_key_file: tls.1,
     })
+}
+
+fn validate_auth_token(token: &str, field: &str) -> Result<(), ConfigError> {
+    if token.len() < 16 {
+        return Err(ConfigError::Invalid(format!(
+            "{field}: token must be at least 16 characters"
+        )));
+    }
+    if !token.is_ascii()
+        || token
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return Err(ConfigError::Invalid(format!(
+            "{field}: token must contain only visible ASCII characters without whitespace"
+        )));
+    }
+    Ok(())
 }
 
 /// Unix：配置文件是否对 group/other 可读（mode & 0o077 != 0）。Windows 无此函数。

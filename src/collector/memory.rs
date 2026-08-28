@@ -20,14 +20,36 @@ pub async fn collect_memory<B: Bmc>(
         .members()
         .await
         .map_err(|e| format!("systems members: {e}"))?;
+    let mut attempted = 0usize;
+    let mut failed = 0usize;
     for system in systems {
         let system_id = system.id().to_string();
-        let Ok(Some(modules)) = system.memory_modules().await else {
-            continue;
+        let modules = match system.memory_modules().await {
+            Ok(Some(modules)) => {
+                attempted += 1;
+                modules
+            }
+            Ok(None) => continue,
+            Err(error) => {
+                attempted += 1;
+                failed += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    system = %system_id,
+                    error = %error,
+                    "memory collection fetch failed"
+                );
+                continue;
+            }
         };
         for module in modules {
             collect_module(bmc_name, &system_id, &module, &mut out).await;
         }
+    }
+    if attempted > 0 && failed == attempted {
+        return Err(format!(
+            "memory: all {failed}/{attempted} declared collections failed"
+        ));
     }
     Ok(out)
 }
@@ -40,20 +62,46 @@ async fn collect_module<B: Bmc>(
 ) {
     let raw = module.raw();
     let id = module.id().to_string();
+    let resource_id = module.odata_id().to_string();
     let (health, state) = status_labels(raw.status.as_ref());
-    push_health(out, bmc_name, "memory", &id, &health, &state);
+    push_health(out, bmc_name, "memory", &resource_id, &health, &state);
     if let Some(value) = raw.manufacturer.clone().flatten() {
-        push_info(out, bmc_name, "manufacturer", &value);
+        push_info(
+            out,
+            bmc_name,
+            "memory",
+            &resource_id,
+            "manufacturer",
+            &value,
+        );
     }
     if let Some(value) = raw.part_number.clone().flatten() {
-        push_info(out, bmc_name, "part_number", &value);
+        push_info(out, bmc_name, "memory", &resource_id, "part_number", &value);
     }
     if let Some(value) = raw.memory_type.flatten() {
-        push_info(out, bmc_name, "memory_type", &format!("{value:?}"));
+        push_info(
+            out,
+            bmc_name,
+            "memory",
+            &resource_id,
+            "memory_type",
+            &format!("{value:?}"),
+        );
     }
     push_capacity(out, bmc_name, system_id, &id, raw.capacity_mi_b.flatten());
-    let Ok(Some(metrics)) = module.metrics().await else {
-        return;
+    let metrics = match module.metrics().await {
+        Ok(Some(metrics)) => metrics,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(
+                bmc = %bmc_name,
+                system = %system_id,
+                memory = %id,
+                error = %error,
+                "memory metrics fetch failed"
+            );
+            return;
+        }
     };
     let raw_metrics = metrics.raw();
     push_value(

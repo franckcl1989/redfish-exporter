@@ -2,7 +2,10 @@ use axum::{Router, routing::get};
 use nv_redfish::ServiceRoot;
 use nv_redfish_bmc_mock::{Bmc as MockBmc, Expect};
 use redfish_exporter::bmc::{BmcHandle, build_http_client, make_bmc};
-use redfish_exporter::config::{AuthMethod, BmcConfig, SecretString, StabilityConfig};
+use redfish_exporter::config::{
+    AuthMethod, BmcConfig, CollectorsConfig, SecretString, StabilityConfig,
+};
+use redfish_exporter::scraper::RoundOptions;
 use redfish_exporter::stability::{
     BmcState, RoundAction, RoundOutcome, next_backoff, on_round_result, round_action,
 };
@@ -17,6 +20,15 @@ fn cfg() -> StabilityConfig {
         cooldown_failures: 3,
         cooldown_base: Duration::from_secs(60),
         cooldown_max: Duration::from_secs(300),
+    }
+}
+
+fn round_options(attempt_session: bool, use_basic_only: bool) -> RoundOptions {
+    RoundOptions {
+        timeout: Duration::from_secs(5),
+        attempt_session,
+        use_basic_only,
+        collectors: CollectorsConfig::default(),
     }
 }
 
@@ -128,6 +140,17 @@ fn healthy_session_recovery_failure_degrades() {
 }
 
 #[test]
+fn healthy_basic_success_after_session_failure_still_degrades() {
+    let now = Instant::now();
+    let state = BmcState::Healthy { failures: 0 };
+    let mut outcome = ok_outcome();
+    outcome.attempted_session = true;
+    outcome.session_recovery_failed = true;
+    let state = on_round_result(&state, &outcome, false, &cfg(), now);
+    assert!(matches!(state, BmcState::SessionDegraded { .. }));
+}
+
+#[test]
 fn cooling_retry_success_recovers() {
     let now = Instant::now();
     let s = BmcState::Cooling {
@@ -136,6 +159,28 @@ fn cooling_retry_success_recovers() {
     };
     let s = on_round_result(&s, &ok_outcome(), false, &cfg(), now);
     assert_eq!(s, BmcState::Healthy { failures: 0 });
+}
+
+#[test]
+fn cooling_retry_with_basic_fallback_enters_session_degraded() {
+    let now = Instant::now();
+    let state = BmcState::Cooling {
+        failures: 3,
+        next_attempt: now,
+    };
+    let mut outcome = ok_outcome();
+    outcome.attempted_session = true;
+    outcome.session_recovery_failed = true;
+
+    let state = on_round_result(&state, &outcome, false, &cfg(), now);
+    match state {
+        BmcState::SessionDegraded {
+            basic_failures: 0,
+            session_failures: 1,
+            next_session_retry,
+        } => assert_eq!(next_session_retry, now + Duration::from_secs(60)),
+        other => panic!("expected SessionDegraded, got {other:?}"),
+    }
 }
 
 #[test]
@@ -287,9 +332,7 @@ async fn fault_injection_401_only_server_degrades_then_cools() {
         None,
         &slow_state,
         &sessions,
-        Duration::from_secs(5),
-        true,
-        false,
+        round_options(true, false),
     )
     .await;
     assert!(o.report.is_none());
@@ -304,9 +347,7 @@ async fn fault_injection_401_only_server_degrades_then_cools() {
             None,
             &slow_state,
             &sessions,
-            Duration::from_secs(5),
-            false,
-            true,
+            round_options(false, true),
         )
         .await;
         assert!(o.report.is_none());
@@ -385,9 +426,7 @@ async fn fault_injection_session_401_basic_ok_degrades_with_mark() {
         None,
         &slow_state,
         &sessions,
-        Duration::from_secs(5),
-        true,
-        false,
+        round_options(true, false),
     )
     .await;
     assert!(o.report.is_none());
@@ -402,9 +441,7 @@ async fn fault_injection_session_401_basic_ok_degrades_with_mark() {
         None,
         &slow_state,
         &sessions,
-        Duration::from_secs(5),
-        false,
-        true,
+        round_options(false, true),
     )
     .await;
     assert!(o.report.is_some(), "round 2 message: {}", o.message);
@@ -495,14 +532,56 @@ async fn fault_injection_garbled_response_round_fails_then_cools() {
             None,
             &slow_state,
             &sessions,
-            Duration::from_secs(5),
-            true,
-            false,
+            round_options(true, false),
         )
         .await;
         assert!(o.report.is_none(), "garbled round must fail: {}", o.message);
         assert!(!o.session_recovery_failed);
         state = on_round_result(&state, &o, true, &cfg, Instant::now());
+    }
+    assert!(matches!(state, BmcState::Cooling { .. }));
+}
+
+/// A missing Redfish ServiceRoot is a real failed round. Treating it as an
+/// empty success would reset the failure counter and hammer a bad endpoint
+/// forever instead of entering adaptive cooldown.
+#[tokio::test]
+async fn fault_injection_root_404_round_fails_then_cools() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new().fallback(|| async { axum::http::StatusCode::NOT_FOUND });
+    listener.set_nonblocking(true).unwrap();
+    let _server = tokio::spawn(async move {
+        axum_server::from_tcp(listener)
+            .unwrap()
+            .serve(app.into_make_service())
+            .await
+            .unwrap();
+    });
+    let handle = basic_handle(&format!("http://{addr}"));
+    let slow_state = Arc::new(Mutex::new(HashMap::new()));
+    let sessions = Arc::new(Mutex::new(HashMap::new()));
+    let cfg = cfg();
+    let mut state = BmcState::Healthy { failures: 0 };
+    for _ in 0..3 {
+        let outcome = redfish_exporter::scraper::run_bmc_round(
+            &handle,
+            None,
+            &slow_state,
+            &sessions,
+            round_options(true, false),
+        )
+        .await;
+        assert!(
+            outcome.report.is_none(),
+            "404 ServiceRoot must fail: {}",
+            outcome.message
+        );
+        assert!(
+            outcome.message.contains("404"),
+            "unexpected error: {outcome:?}"
+        );
+        state = on_round_result(&state, &outcome, true, &cfg, Instant::now());
     }
     assert!(matches!(state, BmcState::Cooling { .. }));
 }

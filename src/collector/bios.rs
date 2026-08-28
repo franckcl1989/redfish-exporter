@@ -1,3 +1,4 @@
+use crate::config::MAX_BIOS_ATTRIBUTE_LIMIT;
 use crate::metrics::Metric;
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
@@ -17,6 +18,16 @@ pub async fn collect_bios<B: Bmc>(
     root: &nv_redfish::ServiceRoot<B>,
     bmc_name: &str,
 ) -> Result<Vec<Metric>, String> {
+    collect_bios_configured(_bmc, root, bmc_name, true, MAX_BIOS_ATTRIBUTE_LIMIT).await
+}
+
+pub async fn collect_bios_configured<B: Bmc>(
+    _bmc: Arc<B>,
+    root: &nv_redfish::ServiceRoot<B>,
+    bmc_name: &str,
+    include_attributes: bool,
+    max_attributes: usize,
+) -> Result<Vec<Metric>, String> {
     let mut out = Vec::new();
     let Some(systems) = root.systems().await.map_err(|e| format!("systems: {e}"))? else {
         return Ok(out);
@@ -25,11 +36,29 @@ pub async fn collect_bios<B: Bmc>(
         .members()
         .await
         .map_err(|e| format!("systems members: {e}"))?;
+    let mut attempted = 0usize;
+    let mut failed = 0usize;
+    let mut remaining_attributes = max_attributes;
+    let mut truncated = false;
     for system in systems {
         let system_id = system.id().to_string();
-        // BIOS 解析失败（如属性值含列表/对象）时跳过该系统
-        let Ok(Some(bios)) = system.bios().await else {
-            continue;
+        let bios = match system.bios().await {
+            Ok(Some(bios)) => {
+                attempted += 1;
+                bios
+            }
+            Ok(None) => continue,
+            Err(error) => {
+                attempted += 1;
+                failed += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    system = %system_id,
+                    error = %error,
+                    "BIOS resource fetch or parse failed"
+                );
+                continue;
+            }
         };
         let raw = bios.raw();
         out.push(
@@ -45,9 +74,34 @@ pub async fn collect_bios<B: Bmc>(
         let Some(attrs) = &raw.attributes else {
             continue;
         };
-        for (name, value) in &attrs.dynamic_properties {
+        if !include_attributes {
+            continue;
+        }
+        let mut attributes = attrs.dynamic_properties.iter().collect::<Vec<_>>();
+        attributes.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        if attributes.len() > remaining_attributes {
+            attributes.truncate(remaining_attributes);
+            truncated = true;
+        }
+        remaining_attributes = remaining_attributes.saturating_sub(attributes.len());
+        for (name, value) in attributes {
             push_attribute(&mut out, bmc_name, &system_id, name, value);
         }
+        if remaining_attributes == 0 {
+            break;
+        }
+    }
+    if truncated {
+        tracing::warn!(
+            bmc = %bmc_name,
+            max_attributes,
+            "BIOS attribute metric limit reached; remaining attributes omitted"
+        );
+    }
+    if attempted > 0 && failed == attempted {
+        return Err(format!(
+            "bios: all {failed}/{attempted} declared resources failed"
+        ));
     }
     Ok(out)
 }

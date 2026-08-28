@@ -1,6 +1,6 @@
 use nv_redfish::ServiceRoot;
 use nv_redfish_bmc_mock::{Bmc as MockBmc, Expect};
-use redfish_exporter::collector::logs::collect_event_logs;
+use redfish_exporter::collector::logs::{collect_event_logs, collect_event_logs_with_limit};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -133,4 +133,115 @@ async fn collects_event_log_entries_across_pages() {
         })
         .collect();
     assert_eq!(severities, vec![Some("Critical"), Some("OK")]);
+}
+
+#[tokio::test]
+async fn event_log_limit_stops_before_the_next_page() {
+    let bmc = Arc::new(Mock::default());
+    common_expects(&bmc);
+    bmc.expect(Expect::get(
+        ENTRIES,
+        json!({
+            "@odata.id": ENTRIES,
+            "Name": "Entries",
+            "Members": [
+                entry_json("2", "2026-08-01T12:00:00Z", "newest", "Critical"),
+                entry_json("1", "2026-08-01T11:00:00Z", "older", "Warning")
+            ],
+            "Members@odata.nextLink": format!("{ENTRIES}?$skip=2")
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_event_logs_with_limit(bmc, &root, "bmc1", 1)
+        .await
+        .unwrap();
+    assert_eq!(metrics.len(), 1);
+    let labels = metrics[0]
+        .labels
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(labels["message"], "newest");
+}
+
+#[tokio::test]
+async fn all_log_services_with_rejected_pagination_fail_the_collector() {
+    let bmc = Arc::new(Mock::default());
+    common_expects(&bmc);
+    bmc.expect(Expect::get(
+        ENTRIES,
+        json!({
+            "@odata.id": ENTRIES,
+            "@odata.type": "#LogEntryCollection.LogEntryCollection",
+            "Name": "Entries",
+            "Members": [entry_json("1", "2026-08-01T12:00:00Z", "partial", "Warning")],
+            "Members@odata.nextLink": "https://evil.example/redfish/v1/Entries?$skip=1",
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let error = collect_event_logs(bmc, &root, "bmc1")
+        .await
+        .expect_err("incomplete event log pagination must not be reported as success");
+    assert!(error.contains("all 1/1 log services failed"), "{error}");
+}
+
+#[tokio::test]
+async fn all_declared_manager_log_service_collections_failing_is_an_error() {
+    let bmc = Arc::new(Mock::default());
+    bmc.expect(Expect::get(
+        "/redfish/v1",
+        json!({
+            "@odata.id": "/redfish/v1", "Id": "Root", "Name": "Root",
+            "RedfishVersion": "1.0.0",
+            "Links": { "Sessions": { "@odata.id": "/redfish/v1/SessionService/Sessions" } },
+            "Managers": { "@odata.id": "/redfish/v1/Managers" },
+        }),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/Managers",
+        json!({
+            "@odata.id": "/redfish/v1/Managers",
+            "@odata.type": "#ManagerCollection.ManagerCollection",
+            "Name": "Managers",
+            "Members": [{ "@odata.id": "/redfish/v1/Managers/BMC" }],
+        }),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/Managers/BMC",
+        json!({
+            "@odata.id": "/redfish/v1/Managers/BMC",
+            "Id": "BMC", "Name": "BMC", "ManagerType": "BMC",
+            "LogServices": { "@odata.id": "/redfish/v1/Managers/BMC/LogServices" },
+        }),
+    ));
+    // No LogServices collection response: the only declared path fails.
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let error = collect_event_logs(bmc, &root, "bmc1")
+        .await
+        .expect_err("declared log-service collection must not fail silently");
+    assert!(
+        error.contains("all 1/1 manager log-service collections failed"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn all_event_log_entries_failing_to_parse_is_an_error() {
+    let bmc = Arc::new(Mock::default());
+    common_expects(&bmc);
+    bmc.expect(Expect::get(
+        ENTRIES,
+        json!({
+            "@odata.id": ENTRIES,
+            "Name": "Entries",
+            "Members": [{ "unexpected": "shape" }],
+        }),
+    ));
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let error = collect_event_logs(bmc, &root, "bmc1")
+        .await
+        .expect_err("all malformed event log entries must not fail silently");
+    assert!(error.contains("all 1/1 entries failed to parse"), "{error}");
 }

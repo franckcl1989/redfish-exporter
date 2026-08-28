@@ -60,6 +60,28 @@ async fn walks_standard_next_link_pages() {
 }
 
 #[tokio::test]
+async fn resolves_path_relative_next_link() {
+    let bmc = Arc::new(Mock::default());
+    let url: ODataId = ENTRIES.to_string().into();
+    bmc.expect(Expect::get(
+        ENTRIES,
+        json!({
+            "@odata.id": ENTRIES,
+            "Members": [{"Id": "2"}],
+            "@odata.nextLink": "Entries?$skip=1",
+        }),
+    ));
+    let relative = "/redfish/v1/Managers/1/LogServices/SEL/Entries?$skip=1";
+    bmc.expect(Expect::get(
+        relative,
+        json!({"@odata.id": relative, "Members": [{"Id": "1"}]}),
+    ));
+
+    let pages = fetch_all_pages(&bmc, &url).await.unwrap();
+    assert_eq!(pages.len(), 2);
+}
+
+#[tokio::test]
 async fn stops_without_next_link() {
     let bmc = Arc::new(Mock::default());
     let url: ODataId = ENTRIES.to_string().into();
@@ -84,10 +106,11 @@ async fn rejects_cross_origin_next_link() {
         "Members": [{"Id": "2"}, {"Id": "1"}],
         "Members@odata.nextLink": "https://evil.example/redfish/v1/Managers/1/LogServices/SEL/Entries?$skip=2",
     })));
-    let pages = fetch_all_pages(&bmc, &url).await.unwrap();
-    assert_eq!(pages.len(), 2);
-    assert_eq!(pages[0]["Id"], "2");
-    assert_eq!(pages[1]["Id"], "1");
+    let result = fetch_all_pages(&bmc, &url).await;
+    assert!(matches!(
+        result,
+        Err(redfish_exporter::pagination::PaginationError::InvalidNextLink(_))
+    ));
 }
 
 #[tokio::test]
@@ -182,4 +205,25 @@ async fn errors_when_total_members_exceeded() {
         res,
         Err(redfish_exporter::pagination::PaginationError::TooManyMembers(2))
     ));
+}
+
+#[tokio::test]
+async fn capped_fetch_truncates_without_requesting_another_page() {
+    let bmc = Arc::new(Mock::default());
+    let url: ODataId = ENTRIES.to_string().into();
+    bmc.expect(Expect::get(
+        ENTRIES,
+        json!({
+            "@odata.id": ENTRIES,
+            "Members": [{"Id": "3"}, {"Id": "2"}, {"Id": "1"}],
+            "Members@odata.nextLink": format!("{ENTRIES}?$skip=3")
+        }),
+    ));
+
+    let pages = redfish_exporter::pagination::fetch_pages_up_to(&bmc, &url, 2)
+        .await
+        .unwrap();
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[0]["Id"], "3");
+    assert_eq!(pages[1]["Id"], "2");
 }

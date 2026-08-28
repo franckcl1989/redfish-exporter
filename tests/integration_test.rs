@@ -82,7 +82,14 @@ async fn full_scrape_cycle_with_mock_bmc() {
 
     let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
     let fast = collect_fast(Arc::clone(&bmc), &root, "bmc1").await.unwrap();
-    let slow = collect_slow(Arc::clone(&bmc), &root, "bmc1").await.unwrap();
+    let slow = collect_slow(
+        Arc::clone(&bmc),
+        &root,
+        "bmc1",
+        redfish_exporter::config::CollectorsConfig::all_enabled(),
+    )
+    .await
+    .unwrap();
     let merged = merge_reports(fast, Some(&slow));
     let report = finalize_report(
         "bmc1",
@@ -399,9 +406,14 @@ async fn bmc_failure_isolation() {
     let fast = collect_fast(Arc::clone(&ok), &root, "ok-bmc")
         .await
         .unwrap();
-    let slow = collect_slow(Arc::clone(&ok), &root, "ok-bmc")
-        .await
-        .unwrap();
+    let slow = collect_slow(
+        Arc::clone(&ok),
+        &root,
+        "ok-bmc",
+        redfish_exporter::config::CollectorsConfig::all_enabled(),
+    )
+    .await
+    .unwrap();
     let merged = merge_reports(fast, Some(&slow));
     let report = finalize_report(
         "ok-bmc",
@@ -422,9 +434,14 @@ async fn bmc_failure_isolation() {
     let fast = collect_fast(Arc::clone(&exhausted), &root, "exhausted-bmc")
         .await
         .unwrap();
-    let slow = collect_slow(Arc::clone(&exhausted), &root, "exhausted-bmc")
-        .await
-        .unwrap();
+    let slow = collect_slow(
+        Arc::clone(&exhausted),
+        &root,
+        "exhausted-bmc",
+        redfish_exporter::config::CollectorsConfig::all_enabled(),
+    )
+    .await
+    .unwrap();
     let merged = merge_reports(fast, Some(&slow));
     let report = finalize_report(
         "exhausted-bmc",

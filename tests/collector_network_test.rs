@@ -152,7 +152,10 @@ async fn collects_ethernet_link_status() {
     assert_eq!(health.len(), 1);
     let labels = labels_of(health[0]);
     assert_eq!(labels.get("resource_type"), Some(&"ethernet_interface"));
-    assert_eq!(labels.get("id"), Some(&"eth0"));
+    assert_eq!(
+        labels.get("id"),
+        Some(&"/redfish/v1/Systems/1/EthernetInterfaces/eth0")
+    );
     assert_eq!(labels.get("health"), Some(&"OK"));
     assert_eq!(labels.get("state"), Some(&"Enabled"));
 
@@ -217,7 +220,10 @@ async fn collects_pcie_health_and_lanes() {
     assert_eq!(health.len(), 1);
     let labels = labels_of(health[0]);
     assert_eq!(labels.get("resource_type"), Some(&"pcie_device"));
-    assert_eq!(labels.get("id"), Some(&"GPU0"));
+    assert_eq!(
+        labels.get("id"),
+        Some(&"/redfish/v1/Chassis/1/PCIeDevices/GPU0")
+    );
     assert_eq!(labels.get("health"), Some(&"OK"));
     assert_eq!(labels.get("state"), Some(&"Enabled"));
     assert_eq!(health[0].value, 1.0);
@@ -230,6 +236,7 @@ async fn collects_pcie_health_and_lanes() {
     assert_eq!(lanes_in_use[0].value, 8.0);
     let labels = labels_of(lanes_in_use[0]);
     assert_eq!(labels.get("bmc"), Some(&"bmc1"));
+    assert_eq!(labels.get("chassis"), Some(&"1"));
     assert_eq!(labels.get("id"), Some(&"GPU0"));
 
     let max_lanes: Vec<_> = metrics
@@ -240,5 +247,99 @@ async fn collects_pcie_health_and_lanes() {
     assert_eq!(max_lanes[0].value, 16.0);
     let labels = labels_of(max_lanes[0]);
     assert_eq!(labels.get("bmc"), Some(&"bmc1"));
+    assert_eq!(labels.get("chassis"), Some(&"1"));
     assert_eq!(labels.get("id"), Some(&"GPU0"));
+}
+
+#[tokio::test]
+async fn falls_back_when_network_adapter_collection_members_lack_inline_id() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_empty_systems_collection(&bmc);
+    expect_chassis_collection(&bmc);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/1",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis/1",
+            "Id": "1", "Name": "Chassis 1", "ChassisType": "RackMount",
+            "NetworkAdapters": {
+                "@odata.id": "/redfish/v1/Chassis/1/NetworkAdapters"
+            },
+        }),
+    ));
+    let malformed_collection = json!({
+        "@odata.id": "/redfish/v1/Chassis/1/NetworkAdapters",
+        "Name": "Network Adapters",
+        "Members": [{
+            "@odata.id": "/redfish/v1/Chassis/1/NetworkAdapters/outboardPCIeCard0",
+            "@odata.type": "#NetworkAdapter.v1_9_0.NetworkAdapter"
+        }],
+        "Members@odata.count": 1,
+    });
+    // Typed collection fetch fails because the annotation makes the member
+    // look expanded while `Id` is absent; the raw fallback fetches it again.
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/1/NetworkAdapters",
+        malformed_collection.clone(),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/1/NetworkAdapters",
+        malformed_collection,
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/1/NetworkAdapters/outboardPCIeCard0",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis/1/NetworkAdapters/outboardPCIeCard0",
+            "Id": "OutboardPCIeCard0",
+            "Name": "OutboardPCIeCard0",
+            "Manufacturer": "Intel",
+            "Model": "Ethernet Controller X710",
+            "Status": { "Health": "OK", "State": "Enabled" },
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_network(bmc, &root, "bmc1").await.unwrap();
+
+    let adapter_health = metrics
+        .iter()
+        .find(|metric| {
+            metric.name == "redfish_health_status"
+                && labels_of(metric).get("resource_type") == Some(&"network_adapter")
+        })
+        .expect("fallback must retain adapter health");
+    assert_eq!(labels_of(adapter_health).get("health"), Some(&"OK"));
+    assert!(metrics.iter().any(|metric| {
+        let labels = labels_of(metric);
+        metric.name == "redfish_info"
+            && labels.get("resource_type") == Some(&"network_adapter")
+            && labels.get("key") == Some(&"model")
+            && labels.get("value") == Some(&"Ethernet Controller X710")
+    }));
+}
+
+#[tokio::test]
+async fn all_declared_ethernet_collections_failing_is_an_error() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Systems/1",
+        json!({
+            "@odata.id": "/redfish/v1/Systems/1",
+            "Id": "1", "Name": "System 1", "SystemType": "Physical",
+            "EthernetInterfaces": {
+                "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces"
+            },
+        }),
+    ));
+    // No EthernetInterfaces response: the only declared collection fails.
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let error = collect_network(bmc, &root, "bmc1")
+        .await
+        .expect_err("declared Ethernet collection must not fail silently");
+    assert!(
+        error.contains("all 1/1 declared collections failed"),
+        "{error}"
+    );
 }

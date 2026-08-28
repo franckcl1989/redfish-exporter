@@ -134,6 +134,52 @@ bmcs:
     );
     let cfg = load_config_with_env(&p, |_| None).unwrap();
     assert_eq!(cfg.slow_interval, None);
+    assert!(!cfg.collectors.event_logs);
+    assert_eq!(cfg.collectors.event_log_limit, 500);
+    assert!(!cfg.collectors.bios_attributes);
+    assert_eq!(cfg.collectors.bios_attribute_limit, 10_000);
+}
+
+#[test]
+fn parses_high_cardinality_collector_opt_ins() {
+    let p = write_tmp(
+        "collectors",
+        r#"
+collectors:
+  event_logs: true
+  event_log_limit: 750
+  bios_attributes: true
+  bios_attribute_limit: 8000
+bmcs:
+  - { name: a, host: https://h1, username: u, password: "p" }
+"#,
+    );
+    let cfg = load_config_with_env(&p, |_| None).unwrap();
+    assert!(cfg.collectors.event_logs);
+    assert_eq!(cfg.collectors.event_log_limit, 750);
+    assert!(cfg.collectors.bios_attributes);
+    assert_eq!(cfg.collectors.bios_attribute_limit, 8_000);
+}
+
+#[test]
+fn rejects_unbounded_high_cardinality_collector_limits() {
+    for (name, field, value) in [
+        ("event_zero", "event_log_limit", 0),
+        ("event_large", "event_log_limit", 5_001),
+        ("bios_zero", "bios_attribute_limit", 0),
+        ("bios_large", "bios_attribute_limit", 10_001),
+    ] {
+        let p = write_tmp(
+            name,
+            &format!(
+                "collectors:\n  {field}: {value}\nbmcs:\n  - {{ name: a, host: https://h1, username: u, password: \"p\" }}\n"
+            ),
+        );
+        assert!(matches!(
+            load_config_with_env(&p, |_| None),
+            Err(ConfigError::Invalid(_))
+        ));
+    }
 }
 
 #[test]
@@ -163,7 +209,7 @@ bmcs:
 "#,
     );
     let err = load_config_with_env(&p, |_| None).unwrap_err();
-    // 防回归：错误消息（启动日志与 /reload 400 响应体）不得回显 URL 中的凭据
+    // 防回归：错误消息不得回显 URL 中的凭据
     assert!(
         !err.to_string().contains("secret"),
         "credentials leaked into error: {err}"
@@ -221,6 +267,31 @@ fn env_var_overrides_password() {
 }
 
 #[test]
+fn env_var_can_supply_an_omitted_file_password() {
+    let p = write_tmp(
+        "env_only",
+        "bmcs:\n  - { name: my-bmc, host: https://h1, username: u }\n",
+    );
+    let cfg = load_config_with_env(&p, |k| {
+        (k == "REDFISH_EXPORTER_PASSWORD_MY_BMC").then(|| "envpw".to_string())
+    })
+    .unwrap();
+    assert_eq!(cfg.bmcs[0].password.expose(), "envpw");
+}
+
+#[test]
+fn omitted_password_without_env_is_rejected() {
+    let p = write_tmp(
+        "password_missing",
+        "bmcs:\n  - { name: a, host: https://h1, username: u }\n",
+    );
+    assert!(matches!(
+        load_config_with_env(&p, |_| None),
+        Err(ConfigError::Invalid(_))
+    ));
+}
+
+#[test]
 fn env_var_absent_keeps_file_password() {
     let p = write_tmp(
         "env_absent",
@@ -263,6 +334,18 @@ fn web_token_too_short_is_rejected() {
     let p = write_tmp(
         "web_token_short",
         "web:\n  auth_token: short\nbmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
+    );
+    assert!(matches!(
+        load_config_with_env(&p, |_| None),
+        Err(ConfigError::Invalid(_))
+    ));
+}
+
+#[test]
+fn web_token_with_whitespace_is_rejected() {
+    let p = write_tmp(
+        "web_token_whitespace",
+        "web:\n  auth_token: \"0123456789abcdef bad\"\nbmcs:\n  - { name: a, host: https://h1, username: u, password: \"p\" }\n",
     );
     assert!(matches!(
         load_config_with_env(&p, |_| None),
@@ -424,4 +507,89 @@ fn stability_rejects_zero_durations() {
         load_config_with_env(&p, |_| None),
         Err(ConfigError::Invalid(_))
     ));
+}
+
+#[test]
+fn rejects_unknown_fields_at_every_config_level() {
+    for (name, yaml) in [
+        (
+            "unknown_root",
+            "scrpae_interval: 30s\nbmcs:\n  - { name: a, host: https://h1, username: u, password: p }\n",
+        ),
+        (
+            "unknown_bmc",
+            "bmcs:\n  - { name: a, host: https://h1, username: u, password: p, insecure_skip_verfy: true }\n",
+        ),
+        (
+            "unknown_web",
+            "web: { auth_tokn: 0123456789abcdef }\nbmcs:\n  - { name: a, host: https://h1, username: u, password: p }\n",
+        ),
+        (
+            "unknown_stability",
+            "stability: { cooldown_failurs: 3 }\nbmcs:\n  - { name: a, host: https://h1, username: u, password: p }\n",
+        ),
+    ] {
+        let p = write_tmp(name, yaml);
+        assert!(matches!(
+            load_config_with_env(&p, |_| None),
+            Err(ConfigError::Yaml(_))
+        ));
+    }
+}
+
+#[test]
+fn rejects_empty_username_and_invalid_base_url_components() {
+    for (name, bmc) in [
+        (
+            "empty_username",
+            "{ name: a, host: https://h1, username: '', password: p }",
+        ),
+        (
+            "host_query",
+            "{ name: a, host: 'https://h1?token=secret', username: u, password: p }",
+        ),
+        (
+            "host_fragment",
+            "{ name: a, host: 'https://h1#fragment', username: u, password: p }",
+        ),
+        (
+            "host_missing",
+            "{ name: a, host: 'https://', username: u, password: p }",
+        ),
+        (
+            "host_path",
+            "{ name: a, host: 'https://h1/redfish/v1', username: u, password: p }",
+        ),
+        (
+            "host_zero_port",
+            "{ name: a, host: 'https://h1:0', username: u, password: p }",
+        ),
+    ] {
+        let p = write_tmp(name, &format!("bmcs:\n  - {bmc}\n"));
+        let result = load_config_with_env(&p, |_| None);
+        assert!(
+            matches!(result, Err(ConfigError::Invalid(_))),
+            "case {name} unexpectedly accepted or failed in the wrong layer"
+        );
+    }
+}
+
+#[test]
+fn rejects_contradictory_tls_options() {
+    for (name, bmc) in [
+        (
+            "http_tls_option",
+            "{ name: a, host: http://h1, username: u, password: p, insecure_skip_verify: true }",
+        ),
+        (
+            "ca_and_insecure",
+            "{ name: a, host: https://h1, username: u, password: p, insecure_skip_verify: true, ca_cert_file: ca.pem }",
+        ),
+    ] {
+        let p = write_tmp(name, &format!("bmcs:\n  - {bmc}\n"));
+        assert!(matches!(
+            load_config_with_env(&p, |_| None),
+            Err(ConfigError::Invalid(_))
+        ));
+    }
 }

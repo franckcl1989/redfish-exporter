@@ -1,6 +1,6 @@
 use nv_redfish::ServiceRoot;
 use nv_redfish_bmc_mock::{Bmc as MockBmc, Expect};
-use redfish_exporter::collector::bios::collect_bios;
+use redfish_exporter::collector::bios::{collect_bios, collect_bios_configured};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -162,6 +162,43 @@ async fn no_settings_no_pending_changes() {
 }
 
 #[tokio::test]
+async fn safe_profile_keeps_pending_state_without_exporting_attributes() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, true);
+    expect_bios(&bmc, true, json!({ "BootMode": "Uefi", "MaxCores": 16 }));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_bios_configured(bmc, &root, "bmc1", false, 10_000)
+        .await
+        .unwrap();
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0].name, "redfish_bios_pending_changes");
+    assert_eq!(metrics[0].value, 1.0);
+}
+
+#[tokio::test]
+async fn bios_attribute_limit_is_deterministic() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, true);
+    expect_bios(&bmc, false, json!({ "Zulu": 3, "Alpha": 1, "Bravo": 2 }));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_bios_configured(bmc, &root, "bmc1", true, 2)
+        .await
+        .unwrap();
+    let attributes = metrics
+        .iter()
+        .filter(|metric| metric.name == "redfish_bios_attribute")
+        .map(|metric| labels_of(metric)["attribute"])
+        .collect::<Vec<_>>();
+    assert_eq!(attributes, ["Alpha", "Bravo"]);
+}
+
+#[tokio::test]
 async fn no_bios_link_is_ok() {
     let bmc = Arc::new(Mock::default());
     expect_service_root(&bmc);
@@ -174,9 +211,10 @@ async fn no_bios_link_is_ok() {
 }
 
 #[tokio::test]
-async fn list_attribute_value_fails_bios_parse_and_skips_system() {
+async fn list_attribute_value_fails_the_only_declared_bios_resource() {
     // dynamic_properties 仅支持 EdmPrimitiveType，属性值为数组时整个 BIOS 资源解析失败，
-    // system.bios() 返回 Err，采集器跳过该系统（不产生任何 BIOS 指标）。
+    // system.bios() 返回 Err；唯一已声明 BIOS 资源失败必须保持可观测，
+    // 不能静默返回空成功。
     let bmc = Arc::new(Mock::default());
     expect_service_root(&bmc);
     expect_systems_collection(&bmc);
@@ -184,6 +222,11 @@ async fn list_attribute_value_fails_bios_parse_and_skips_system() {
     expect_bios(&bmc, false, json!({ "ListAttr": ["a", "b"] }));
 
     let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
-    let metrics = collect_bios(bmc, &root, "bmc1").await.unwrap();
-    assert!(metrics.is_empty());
+    let error = collect_bios(bmc, &root, "bmc1")
+        .await
+        .expect_err("the only declared BIOS resource failed to parse");
+    assert!(
+        error.contains("all 1/1 declared resources failed"),
+        "{error}"
+    );
 }

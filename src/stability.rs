@@ -91,9 +91,7 @@ pub fn on_round_result(
     let ok = !failed && outcome.report.is_some();
     match state {
         BmcState::Healthy { failures } => {
-            if ok {
-                BmcState::Healthy { failures: 0 }
-            } else if outcome.session_recovery_failed {
+            if outcome.session_recovery_failed {
                 // 不变量（run_bmc_round 的守卫保证）：session_recovery_failed ⇒
                 // attempted_session——该标志仅在 attempt_session=true 的轮内
                 // （轮首建会话失败 / 401 重登失败）置位。
@@ -103,8 +101,10 @@ pub fn on_round_result(
                     session_failures: 1,
                     next_session_retry: now + next_backoff(1, cfg.cooldown_base, cfg.cooldown_max),
                 }
+            } else if ok {
+                BmcState::Healthy { failures: 0 }
             } else {
-                let f = failures + 1;
+                let f = failures.saturating_add(1);
                 if f >= cfg.cooldown_failures {
                     BmcState::Cooling {
                         failures: f,
@@ -116,10 +116,19 @@ pub fn on_round_result(
             }
         }
         BmcState::Cooling { failures, .. } => {
-            if ok {
+            if outcome.session_recovery_failed {
+                // 冷却到期后若 session 仍不可用、但 basic 兜底成功，应进入降级态，
+                // 否则会误回 Healthy 并在每一轮重复冲击 SessionService。
+                debug_assert!(outcome.attempted_session);
+                BmcState::SessionDegraded {
+                    basic_failures: 0,
+                    session_failures: 1,
+                    next_session_retry: now + next_backoff(1, cfg.cooldown_base, cfg.cooldown_max),
+                }
+            } else if ok {
                 BmcState::Healthy { failures: 0 }
             } else {
-                let f = failures + 1;
+                let f = failures.saturating_add(1);
                 BmcState::Cooling {
                     failures: f,
                     next_attempt: now + next_backoff(f, cfg.cooldown_base, cfg.cooldown_max),
@@ -137,7 +146,7 @@ pub fn on_round_result(
                     BmcState::Healthy { failures: 0 }
                 } else if outcome.attempted_session {
                     // session 仍失败但 basic 成功：继续降级，session 退避推进
-                    let sf = session_failures + 1;
+                    let sf = session_failures.saturating_add(1);
                     BmcState::SessionDegraded {
                         basic_failures: 0,
                         session_failures: sf,
@@ -153,9 +162,9 @@ pub fn on_round_result(
                     }
                 }
             } else {
-                let bf = basic_failures + 1;
+                let bf = basic_failures.saturating_add(1);
                 let sf = if outcome.attempted_session {
-                    session_failures + 1
+                    session_failures.saturating_add(1)
                 } else {
                     *session_failures
                 };

@@ -1,4 +1,8 @@
-use redfish_exporter::metrics::{Metric, SENSOR_READING, encode, register_into, unbox_reading};
+use redfish_exporter::collector::finalize_report;
+use redfish_exporter::metrics::{
+    Metric, MetricsError, SENSOR_READING, encode, register_into, unbox_reading,
+};
+use std::time::Instant;
 
 #[test]
 fn builds_gauge_metric() {
@@ -33,12 +37,12 @@ fn register_and_encode_roundtrip() {
 }
 
 #[test]
-fn duplicate_labels_are_merged() {
-    // 同名+同 label 集的指标合并：结果只有一个指标序列
+fn same_family_with_distinct_label_values_is_merged() {
+    // 同名+同 label 集、不同 label 值的样本合并到同一指标族。
     let reg = prometheus::Registry::new();
     let m1 = Metric::gauge(SENSOR_READING.0, SENSOR_READING.1)
         .label("bmc", "bmc1".into())
-        .label("name", "A".into())
+        .label("name", "B".into())
         .build(1.0);
     let m2 = Metric::gauge(SENSOR_READING.0, SENSOR_READING.1)
         .label("bmc", "bmc1".into())
@@ -46,7 +50,89 @@ fn duplicate_labels_are_merged() {
         .build(2.0);
     register_into(&[m1, m2], &reg).unwrap();
     let out = encode(&reg);
-    assert_eq!(out.matches("redfish_sensor_reading{").count(), 1);
+    assert_eq!(out.matches("redfish_sensor_reading{").count(), 2);
+}
+
+#[test]
+fn counter_metrics_are_exposed_as_counters() {
+    let registry = prometheus::Registry::new();
+    let metric = Metric::counter("redfish_test_total", "test counter")
+        .label("bmc", "one".into())
+        .build(7.0);
+    register_into(&[metric], &registry).unwrap();
+    let text = encode(&registry);
+    assert!(text.contains("# TYPE redfish_test_total counter"), "{text}");
+    assert!(text.contains("redfish_test_total{bmc=\"one\"} 7"), "{text}");
+}
+
+#[test]
+fn conflicting_metric_descriptors_are_rejected() {
+    let registry = prometheus::Registry::new();
+    let result = register_into(
+        &[
+            Metric::gauge("redfish_conflict", "first").build(1.0),
+            Metric::gauge("redfish_conflict", "second").build(2.0),
+        ],
+        &registry,
+    );
+    assert!(matches!(
+        result,
+        Err(MetricsError::ConflictingDescriptor { .. })
+    ));
+}
+
+#[test]
+fn duplicate_label_keys_are_rejected_in_release_too() {
+    let registry = prometheus::Registry::new();
+    let metric = Metric::gauge("redfish_duplicate_label", "test")
+        .label("bmc", "first".into())
+        .label("bmc", "second".into())
+        .build(1.0);
+    assert!(matches!(
+        register_into(&[metric], &registry),
+        Err(MetricsError::DuplicateLabel { .. })
+    ));
+}
+
+#[test]
+fn duplicate_series_are_rejected_instead_of_silently_overwritten() {
+    let registry = prometheus::Registry::new();
+    let metrics = vec![
+        Metric::gauge("duplicate_series", "help")
+            .label("id", "same".into())
+            .build(1.0),
+        Metric::gauge("duplicate_series", "help")
+            .label("id", "same".into())
+            .build(2.0),
+    ];
+    assert!(matches!(
+        register_into(&metrics, &registry),
+        Err(MetricsError::DuplicateSeries { .. })
+    ));
+}
+
+#[test]
+fn scrape_finalization_deduplicates_the_same_resource_reached_by_two_paths() {
+    let labels = |value: f64| {
+        Metric::gauge("redfish_sensor_reading", "Sensor reading")
+            .label("bmc", "b1".into())
+            .label("chassis", "1".into())
+            .label("id", "/redfish/v1/Chassis/1/Sensors/Ambient".into())
+            .build(value)
+    };
+    let report = finalize_report(
+        "b1",
+        vec![labels(25.0), labels(26.0)],
+        vec![],
+        Instant::now(),
+    );
+    let readings: Vec<_> = report
+        .metrics
+        .iter()
+        .filter(|metric| metric.name == "redfish_sensor_reading")
+        .collect();
+    assert_eq!(readings.len(), 1);
+    assert_eq!(readings[0].value, 25.0, "first navigation path wins");
 }
 
 #[test]

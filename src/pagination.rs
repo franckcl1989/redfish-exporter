@@ -77,6 +77,8 @@ pub enum PaginationError<B: Bmc> {
     TooManyPages(usize),
     #[error("pagination exceeded {0} total members")]
     TooManyMembers(usize),
+    #[error("pagination nextLink is invalid or not demonstrably same-origin: {0}")]
+    InvalidNextLink(String),
 }
 
 // 手写 Debug：derive 会对泛型参数 `B` 加 `B: Debug` 约束（字段中提及即约束），
@@ -88,6 +90,7 @@ impl<B: Bmc> std::fmt::Debug for PaginationError<B> {
             Self::PageTooLarge => f.write_str("PageTooLarge"),
             Self::TooManyPages(n) => f.debug_tuple("TooManyPages").field(n).finish(),
             Self::TooManyMembers(n) => f.debug_tuple("TooManyMembers").field(n).finish(),
+            Self::InvalidNextLink(link) => f.debug_tuple("InvalidNextLink").field(link).finish(),
         }
     }
 }
@@ -99,6 +102,18 @@ pub async fn fetch_all_pages<B: Bmc>(
     fetch_all_pages_with_limits(bmc, url, MAX_PAGES, MAX_PAGE_BYTES, MAX_TOTAL_MEMBERS).await
 }
 
+/// Fetch at most `max_total_members` members and stop pagination successfully
+/// once the cap is reached. This is used only by explicitly enabled
+/// high-cardinality collectors, where truncation is safer than either an
+/// unbounded snapshot or marking an otherwise healthy BMC down.
+pub async fn fetch_pages_up_to<B: Bmc>(
+    bmc: &Arc<B>,
+    url: &ODataId,
+    max_total_members: usize,
+) -> Result<Vec<Value>, PaginationError<B>> {
+    fetch_pages(bmc, url, MAX_PAGES, MAX_PAGE_BYTES, max_total_members, true).await
+}
+
 /// 带显式上限的分页抓取（测试接缝）：上限语义同 fetch_all_pages。
 pub async fn fetch_all_pages_with_limits<B: Bmc>(
     bmc: &Arc<B>,
@@ -106,6 +121,25 @@ pub async fn fetch_all_pages_with_limits<B: Bmc>(
     max_pages: usize,
     max_page_bytes: usize,
     max_total_members: usize,
+) -> Result<Vec<Value>, PaginationError<B>> {
+    fetch_pages(
+        bmc,
+        url,
+        max_pages,
+        max_page_bytes,
+        max_total_members,
+        false,
+    )
+    .await
+}
+
+async fn fetch_pages<B: Bmc>(
+    bmc: &Arc<B>,
+    url: &ODataId,
+    max_pages: usize,
+    max_page_bytes: usize,
+    max_total_members: usize,
+    truncate_at_member_limit: bool,
 ) -> Result<Vec<Value>, PaginationError<B>> {
     let mut out = Vec::new();
     let mut next = url.clone();
@@ -120,7 +154,22 @@ pub async fn fetch_all_pages_with_limits<B: Bmc>(
             tracing::warn!(url = %next, size, "pagination page exceeds size limit");
             return Err(PaginationError::PageTooLarge);
         }
-        out.extend(page.members.iter().cloned());
+        if truncate_at_member_limit {
+            let remaining = max_total_members.saturating_sub(out.len());
+            out.extend(page.members.iter().take(remaining).cloned());
+            if page.members.len() > remaining
+                || (out.len() == max_total_members && page.next_link.is_some())
+            {
+                tracing::warn!(
+                    url = %next,
+                    members = out.len(),
+                    "pagination member cap reached; remaining members omitted"
+                );
+                return Ok(out);
+            }
+        } else {
+            out.extend(page.members.iter().cloned());
+        }
         if out.len() > max_total_members {
             tracing::warn!(
                 url = %next,
@@ -133,8 +182,8 @@ pub async fn fetch_all_pages_with_limits<B: Bmc>(
             return Ok(out);
         };
         let Some(resolved) = resolve_next_link(&next, link) else {
-            tracing::warn!(url = %next, link, "pagination nextLink resolve failed, stopping");
-            return Ok(out);
+            tracing::warn!(url = %next, link, "pagination nextLink rejected");
+            return Err(PaginationError::InvalidNextLink(link.clone()));
         };
         if !visited.insert(resolved.to_string()) {
             tracing::warn!(url = %resolved, "pagination loop detected, stopping");
@@ -146,18 +195,41 @@ pub async fn fetch_all_pages_with_limits<B: Bmc>(
     Err(PaginationError::TooManyPages(max_pages))
 }
 
-/// 解析 nextLink：以 `/` 开头的相对路径直接采用；绝对 http(s) 仅放行同源。
+/// 解析 nextLink：绝对路径与普通相对 URI-reference 被归一化为 OData 路径；
+/// 绝对 http(s) 只有在当前 ODataId 本身也携带 origin 且二者同源时才放行。
 fn resolve_next_link(current: &ODataId, link: &str) -> Option<ODataId> {
-    if link.starts_with('/') {
+    if link.starts_with('/') && !link.starts_with("//") {
         return Some(link.to_string().into());
     }
-    let url = Url::parse(link).ok()?;
-    if !matches!(url.scheme(), "http" | "https") {
+    if let Ok(url) = Url::parse(link) {
+        if !matches!(url.scheme(), "http" | "https") {
+            return None;
+        }
+        let cur = Url::parse(&current.to_string()).ok()?;
+        if cur.origin() != url.origin() {
+            return None;
+        }
+        let mut normalized = url.path().to_string();
+        if let Some(query) = url.query() {
+            normalized.push('?');
+            normalized.push_str(query);
+        }
+        return Some(normalized.into());
+    }
+
+    // Resolve a path-relative reference without learning or inventing the real BMC
+    // origin. A fixed dummy origin lets us normalize `?$skip=...` and `page/2`
+    // while rejecting scheme-relative authorities such as `//evil.example/...`.
+    let dummy = Url::parse("http://redfish.invalid/").ok()?;
+    let current = dummy.join(&current.to_string()).ok()?;
+    let resolved = current.join(link).ok()?;
+    if resolved.origin() != dummy.origin() {
         return None;
     }
-    let cur = Url::parse(&current.to_string()).ok()?;
-    if (cur.scheme(), cur.host_str(), cur.port()) != (url.scheme(), url.host_str(), url.port()) {
-        return None;
+    let mut normalized = resolved.path().to_string();
+    if let Some(query) = resolved.query() {
+        normalized.push('?');
+        normalized.push_str(query);
     }
-    Some(link.to_string().into())
+    Some(normalized.into())
 }

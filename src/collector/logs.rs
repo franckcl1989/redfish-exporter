@@ -1,5 +1,6 @@
+use crate::config::MAX_EVENT_LOG_LIMIT;
 use crate::metrics::Metric;
-use crate::pagination::fetch_all_pages;
+use crate::pagination::fetch_pages_up_to;
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
 use std::sync::Arc;
@@ -15,7 +16,23 @@ pub async fn collect_event_logs<B: Bmc>(
     root: &nv_redfish::ServiceRoot<B>,
     bmc_name: &str,
 ) -> Result<Vec<Metric>, String> {
+    collect_event_logs_with_limit(bmc, root, bmc_name, MAX_EVENT_LOG_LIMIT).await
+}
+
+pub async fn collect_event_logs_with_limit<B: Bmc>(
+    bmc: Arc<B>,
+    root: &nv_redfish::ServiceRoot<B>,
+    bmc_name: &str,
+    max_entries: usize,
+) -> Result<Vec<Metric>, String> {
     let mut out = Vec::new();
+    let mut manager_attempts = 0usize;
+    let mut manager_failures = 0usize;
+    let mut attempted_services = 0usize;
+    let mut failed_services = 0usize;
+    let mut attempted_entries = 0usize;
+    let mut failed_entries = 0usize;
+    let mut remaining_entries = max_entries;
     let Some(managers) = root
         .managers()
         .await
@@ -27,20 +44,40 @@ pub async fn collect_event_logs<B: Bmc>(
         .members()
         .await
         .map_err(|e| format!("manager members: {e}"))?;
-    for manager in managers {
+    'managers: for manager in managers {
         let manager_id = manager.id().to_string();
-        let Ok(Some(services)) = manager.log_services().await else {
-            continue;
+        let services = match manager.log_services().await {
+            Ok(Some(services)) => {
+                manager_attempts += 1;
+                services
+            }
+            Ok(None) => continue,
+            Err(error) => {
+                manager_attempts += 1;
+                manager_failures += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    manager = %manager_id,
+                    error = %error,
+                    "log service collection fetch failed"
+                );
+                continue;
+            }
         };
         for service in services {
+            if remaining_entries == 0 {
+                break 'managers;
+            }
             let service_id = service.id().to_string();
             let raw = service.raw();
             let Some(entries_ref) = &raw.entries else {
                 continue;
             };
-            let entries = match fetch_all_pages(&bmc, entries_ref.id()).await {
+            attempted_services += 1;
+            let entries = match fetch_pages_up_to(&bmc, entries_ref.id(), remaining_entries).await {
                 Ok(entries) => entries,
                 Err(e) => {
+                    failed_services += 1;
                     tracing::warn!(
                         bmc = %bmc_name,
                         manager = %manager_id,
@@ -51,15 +88,50 @@ pub async fn collect_event_logs<B: Bmc>(
                     continue;
                 }
             };
+            remaining_entries = remaining_entries.saturating_sub(entries.len());
             for value in entries {
-                let Ok(entry) =
-                    serde_json::from_value::<nv_redfish::schema::log_entry::LogEntry>(value)
-                else {
-                    continue;
+                attempted_entries += 1;
+                let entry = match serde_json::from_value::<nv_redfish::schema::log_entry::LogEntry>(
+                    value,
+                ) {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        failed_entries += 1;
+                        tracing::warn!(
+                            bmc = %bmc_name,
+                            manager = %manager_id,
+                            service = %service_id,
+                            error = %error,
+                            "event log entry parse failed"
+                        );
+                        continue;
+                    }
                 };
                 push_entry(&mut out, bmc_name, &manager_id, &service_id, &entry);
             }
         }
+    }
+    if remaining_entries == 0 {
+        tracing::warn!(
+            bmc = %bmc_name,
+            max_entries,
+            "event log metric limit reached; remaining entries omitted"
+        );
+    }
+    if manager_attempts > 0 && manager_failures == manager_attempts {
+        return Err(format!(
+            "event logs: all {manager_failures}/{manager_attempts} manager log-service collections failed"
+        ));
+    }
+    if attempted_services > 0 && failed_services == attempted_services {
+        return Err(format!(
+            "event log pagination: all {failed_services}/{attempted_services} log services failed"
+        ));
+    }
+    if attempted_entries > 0 && failed_entries == attempted_entries {
+        return Err(format!(
+            "event logs: all {failed_entries}/{attempted_entries} entries failed to parse"
+        ));
     }
     Ok(out)
 }

@@ -1,6 +1,6 @@
 //! 性能基准（#[ignore]，本地跑）：确定性 mock 环境的端到端轮耗时、编码耗时、
 //! 预编码 /metrics 热路径耗时与 RSS 采样。
-//!   cargo test --release --test perf_test -- --ignored --nocapture
+//!   cargo test --profile release-gates --test perf_test -- --ignored --nocapture
 //!   $env:PERF_ASSERT="1" 时启用软阈值断言（本地验证用，不进 CI）。
 
 mod common;
@@ -67,7 +67,14 @@ async fn perf_benchmark_mock_pipeline() {
         let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
         let t0 = Instant::now();
         let fast = collect_fast(Arc::clone(&bmc), &root, "perf").await.unwrap();
-        let slow = collect_slow(Arc::clone(&bmc), &root, "perf").await.unwrap();
+        let slow = collect_slow(
+            Arc::clone(&bmc),
+            &root,
+            "perf",
+            redfish_exporter::config::CollectorsConfig::all_enabled(),
+        )
+        .await
+        .unwrap();
         let merged = merge_reports(fast, Some(&slow));
         let report = finalize_report("perf", merged.metrics, merged.failed_resources, t0);
         assert!(report.failed_resources.is_empty());
@@ -79,16 +86,12 @@ async fn perf_benchmark_mock_pipeline() {
         encode_ms.push(te.elapsed().as_secs_f64() * 1000.0);
         bytes_lens.push(encoded.len());
 
-        // 预编码 /metrics 热路径：拼接各 BMC 条目字节（单 BMC）
+        // 预编码 /metrics 热路径：克隆统一 Bytes 句柄（单 BMC）
         snap.update("perf", registry);
         let th = Instant::now();
-        let entries = snap.registries();
-        let total: usize = entries.iter().map(|(_, e)| e.encoded.len()).sum();
-        let mut body: Vec<u8> = Vec::with_capacity(total);
-        for (_, e) in &entries {
-            body.extend_from_slice(&e.encoded);
-        }
+        let body = snap.encoded().expect("snapshot was just published");
         hot_ms.push(th.elapsed().as_secs_f64() * 1000.0);
+        std::hint::black_box(body.len());
     }
 
     let mut sys = sysinfo::System::new();

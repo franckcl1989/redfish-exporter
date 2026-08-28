@@ -72,17 +72,78 @@ pub async fn collect_storage<B: Bmc>(
         .members()
         .await
         .map_err(|e| format!("systems members: {e}"))?;
+    let mut collection_attempts = 0usize;
+    let mut collection_failures = 0usize;
+    let mut controller_attempts = 0usize;
+    let mut controller_failures = 0usize;
     for system in systems {
         let system_id = system.id().to_string();
-        let Ok(Some(storages)) = system.storage_controllers().await else {
-            continue;
+        let storages = match system.storage_controllers().await {
+            Ok(Some(storages)) => {
+                collection_attempts += 1;
+                storages
+            }
+            Ok(None) => continue,
+            // IEIT/Inspur NF5280M6 firmware can advertise a synthetic
+            // `PCIE*_RAID` member and then return HTTP 500/vendor code 17034
+            // for it when no RAID controller is installed. Treat only this
+            // exact vendor response as an absent optional collection; other
+            // declared collection failures remain observable.
+            Err(error) if is_absent_raid_controller_error(&error.to_string()) => {
+                tracing::debug!(
+                    bmc = %bmc_name,
+                    system = %system_id,
+                    "firmware advertised an empty RAID controller collection"
+                );
+                continue;
+            }
+            Err(error) => {
+                collection_attempts += 1;
+                collection_failures += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    system = %system_id,
+                    error = %error,
+                    "storage collection fetch failed"
+                );
+                continue;
+            }
         };
         for storage in storages {
-            collect_storage_controller(bmc.as_ref(), bmc_name, &system_id, &storage, &mut out)
-                .await;
+            controller_attempts += 1;
+            if let Err(error) =
+                collect_storage_controller(bmc.as_ref(), bmc_name, &system_id, &storage, &mut out)
+                    .await
+            {
+                controller_failures += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    system = %system_id,
+                    storage = %storage.id(),
+                    error = %error,
+                    "storage controller subresources failed"
+                );
+            }
         }
     }
+    if collection_attempts > 0 && collection_failures == collection_attempts {
+        return Err(format!(
+            "storage: all {collection_failures}/{collection_attempts} declared collections failed"
+        ));
+    }
+    if controller_attempts > 0 && controller_failures == controller_attempts {
+        return Err(format!(
+            "storage: all {controller_failures}/{controller_attempts} controllers failed"
+        ));
+    }
     Ok(out)
+}
+
+fn is_absent_raid_controller_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("500 internal server error")
+        && normalized.contains("17034")
+        && normalized.contains("no raid controller available")
 }
 
 async fn collect_storage_controller<B: Bmc>(
@@ -91,9 +152,11 @@ async fn collect_storage_controller<B: Bmc>(
     system_id: &str,
     storage: &nv_redfish::computer_system::Storage<B>,
     out: &mut Vec<Metric>,
-) {
+) -> Result<(), String> {
     let raw = storage.raw();
     let storage_id = storage.id().to_string();
+    let mut attempted = 0usize;
+    let mut failed = 0usize;
 
     // 存储控制器明细（标准 StorageControllers 数组；真机仅 Dell 有，
     // 浪潮存储子树固件损坏不产出）：类型化 schema 无该字段（仅 ReferenceLeaf），
@@ -103,29 +166,94 @@ async fn collect_storage_controller<B: Bmc>(
         .storage_controllers
         .as_ref()
         .is_some_and(|v| !v.is_empty())
-        && let Ok(raw_payload) = bmc.get::<RawStoragePayload>(storage.odata_id()).await
     {
-        collect_storage_controllers(bmc_name, system_id, &storage_id, &raw_payload, out);
-    }
-
-    // drives 获取失败时跳过该子资源，不阻止 volumes 采集
-    if let Ok(Some(drives)) = storage.drives().await {
-        for drive in drives {
-            collect_drive(bmc, bmc_name, system_id, &storage_id, &drive, out).await;
+        attempted += 1;
+        match bmc.get::<RawStoragePayload>(storage.odata_id()).await {
+            Ok(raw_payload) => {
+                collect_storage_controllers(bmc_name, system_id, &storage_id, &raw_payload, out);
+            }
+            Err(error) => {
+                failed += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    system = %system_id,
+                    storage = %storage_id,
+                    error = %error,
+                    "raw storage controller payload fetch failed"
+                );
+            }
         }
     }
 
-    let Some(volumes_nav) = &raw.volumes else {
-        return;
-    };
-    if let Ok(collection) = volumes_nav.get(bmc).await {
-        for volume_ref in &collection.members {
-            let Ok(volume) = volume_ref.get(bmc).await else {
-                continue;
-            };
-            collect_volume(bmc_name, system_id, &storage_id, &volume, out);
+    // A failed drive subtree does not block volumes, but remains observable if
+    // every declared subtree of this controller fails.
+    match storage.drives().await {
+        Ok(Some(drives)) => {
+            attempted += 1;
+            for drive in drives {
+                collect_drive(bmc, bmc_name, system_id, &storage_id, &drive, out).await;
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            attempted += 1;
+            failed += 1;
+            tracing::warn!(
+                bmc = %bmc_name,
+                system = %system_id,
+                storage = %storage_id,
+                error = %error,
+                "drive subtree fetch failed"
+            );
         }
     }
+
+    if let Some(volumes_nav) = &raw.volumes {
+        attempted += 1;
+        match volumes_nav.get(bmc).await {
+            Ok(collection) => {
+                let total = collection.members.len();
+                let mut member_failures = 0usize;
+                for volume_ref in &collection.members {
+                    match volume_ref.get(bmc).await {
+                        Ok(volume) => {
+                            collect_volume(bmc_name, system_id, &storage_id, &volume, out);
+                        }
+                        Err(error) => {
+                            member_failures += 1;
+                            tracing::warn!(
+                                bmc = %bmc_name,
+                                system = %system_id,
+                                storage = %storage_id,
+                                error = %error,
+                                "volume fetch failed"
+                            );
+                        }
+                    }
+                }
+                if total > 0 && member_failures == total {
+                    failed += 1;
+                }
+            }
+            Err(error) => {
+                failed += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    system = %system_id,
+                    storage = %storage_id,
+                    error = %error,
+                    "volume collection fetch failed"
+                );
+            }
+        }
+    }
+
+    if attempted > 0 && failed == attempted {
+        return Err(format!(
+            "all {failed}/{attempted} declared storage subresources failed"
+        ));
+    }
+    Ok(())
 }
 
 fn collect_storage_controllers(
@@ -188,8 +316,9 @@ async fn collect_drive<B: Bmc>(
 ) {
     let raw = drive.raw();
     let id = drive.id().to_string();
+    let resource_id = drive.odata_id().to_string();
     let (health, state) = status_labels(raw.status.as_ref());
-    push_health(out, bmc_name, "drive", &id, &health, &state);
+    push_health(out, bmc_name, "drive", &resource_id, &health, &state);
     // 驱动器 OEM 字段（Dell DellPhysicalDisk；真机 Dell 有，浪潮驱动器明细
     // 全 null 仅 Status 不产出）：Drive facade 的 raw 保留 Oem 块
     // （Item.oem，与 Processor 同层），经类型化 OEM 直接导航，无需 raw JSON
@@ -234,16 +363,23 @@ async fn collect_drive<B: Bmc>(
         }
     }
     if let Some(value) = raw.manufacturer.clone().flatten() {
-        push_info(out, bmc_name, "manufacturer", &value);
+        push_info(out, bmc_name, "drive", &resource_id, "manufacturer", &value);
     }
     if let Some(value) = raw.model.clone().flatten() {
-        push_info(out, bmc_name, "model", &value);
+        push_info(out, bmc_name, "drive", &resource_id, "model", &value);
     }
     if let Some(value) = raw.serial_number.clone().flatten() {
-        push_info(out, bmc_name, "serial_number", &value);
+        push_info(
+            out,
+            bmc_name,
+            "drive",
+            &resource_id,
+            "serial_number",
+            &value,
+        );
     }
     if let Some(value) = raw.revision.clone().flatten() {
-        push_info(out, bmc_name, "revision", &value);
+        push_info(out, bmc_name, "drive", &resource_id, "revision", &value);
     }
     push_value(
         out,
@@ -274,8 +410,20 @@ async fn collect_drive<B: Bmc>(
             Some(if failure { 1.0 } else { 0.0 }),
         );
     }
-    let Ok(Some(metrics)) = drive.metrics().await else {
-        return;
+    let metrics = match drive.metrics().await {
+        Ok(Some(metrics)) => metrics,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(
+                bmc = %bmc_name,
+                system = %system_id,
+                storage = %storage_id,
+                drive = %id,
+                error = %error,
+                "drive metrics fetch failed"
+            );
+            return;
+        }
     };
     push_value(
         out,
@@ -335,9 +483,17 @@ fn collect_volume(
     out: &mut Vec<Metric>,
 ) {
     let id = volume.base.id.clone();
+    let resource_id = volume.odata_id().to_string();
     let (health, state) = status_labels(volume.status.as_ref());
-    push_health(out, bmc_name, "volume", &id, &health, &state);
-    push_info(out, bmc_name, "name", &volume.base.name.clone());
+    push_health(out, bmc_name, "volume", &resource_id, &health, &state);
+    push_info(
+        out,
+        bmc_name,
+        "volume",
+        &resource_id,
+        "name",
+        &volume.base.name,
+    );
     push_value(
         out,
         bmc_name,
@@ -362,11 +518,37 @@ fn push_value(
         return;
     };
     out.push(
-        Metric::gauge(name_help.0, name_help.1)
-            .label("bmc", bmc_name.to_string())
-            .label("system", system_id.to_string())
-            .label("storage", storage_id.to_string())
-            .label("id", id.to_string())
-            .build(value),
+        if name_help.0.ends_with("_total") {
+            Metric::counter(name_help.0, name_help.1)
+        } else {
+            Metric::gauge(name_help.0, name_help.1)
+        }
+        .label("bmc", bmc_name.to_string())
+        .label("system", system_id.to_string())
+        .label("storage", storage_id.to_string())
+        .label("id", id.to_string())
+        .build(value),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_absent_raid_controller_error;
+
+    #[test]
+    fn recognizes_only_the_ieit_empty_raid_response() {
+        let expected = "BMC error: Invalid HTTP response - status: 500 Internal Server Error \
+            text: { \"error\": \"There are no RAID Controller Available\", \"code\": 17034 }";
+        assert!(is_absent_raid_controller_error(expected));
+
+        assert!(!is_absent_raid_controller_error(
+            "status: 500 Internal Server Error: controller temporarily unavailable"
+        ));
+        assert!(!is_absent_raid_controller_error(
+            "status: 404 Not Found: code 17034, There are no RAID Controller Available"
+        ));
+        assert!(!is_absent_raid_controller_error(
+            "status: 500 Internal Server Error: code 17035, There are no RAID Controller Available"
+        ));
+    }
 }

@@ -1,17 +1,19 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
+
+use bytes::Bytes;
 
 use crate::collector::ScrapeReport;
 use crate::metrics::{
-    BUILD_INFO, Metric, MetricsError, SCRAPE_ERROR, SCRAPE_ERRORS_TOTAL, UP, encode_bytes_into,
-    register_into,
+    BUILD_INFO, Metric, MetricsError, SCRAPE_ERROR, SCRAPE_ERRORS_TOTAL, UP,
+    encode_metric_families_into, register_into,
 };
 use crate::recover_lock;
 
-/// 快照条目：registry 与发布时编码一次的文本（/metrics 直接拼接，零现场编码）。
+/// 单 BMC registry 条目。HTTP exposition 在 Snapshot 层合并后统一预编码，避免
+/// 多 registry 文本直接拼接产生重复 HELP/TYPE 与重复 build_info 样本。
 pub struct RegistryEntry {
     pub registry: Arc<prometheus::Registry>,
-    pub encoded: Vec<u8>,
 }
 
 /// 指标快照：RwLock 内为每个 BMC 各存一个 Arc 指针，update 按 BMC 名
@@ -21,7 +23,10 @@ pub struct RegistryEntry {
 pub struct Snapshot {
     inner: RwLock<HashMap<String, Arc<RegistryEntry>>>,
     errors: Mutex<HashMap<String, u64>>,
-    /// 编码复用缓冲：跨轮增长一次后不再反复扩容（每轮 encode 写入后克隆入条目）。
+    /// 全部 BMC 合并后的合法 Prometheus exposition；Bytes clone 为 O(1)，HTTP
+    /// 热路径不重新编码也不复制整个响应体。
+    encoded: RwLock<Option<Bytes>>,
+    /// 合并编码复用缓冲：跨轮增长一次后不再反复扩容。
     scratch: Mutex<Vec<u8>>,
 }
 
@@ -36,15 +41,16 @@ impl Snapshot {
         Snapshot {
             inner: RwLock::new(HashMap::new()),
             errors: Mutex::new(HashMap::new()),
+            encoded: RwLock::new(None),
             scratch: Mutex::new(Vec::new()),
         }
     }
 
     /// 累计指定 BMC 的失败资源数（跨轮累加）。
     pub fn record_scrape_errors(&self, bmc: &str, count: u64) {
-        *recover_lock(self.errors.lock())
-            .entry(bmc.to_string())
-            .or_insert(0) += count;
+        let mut errors = recover_lock(self.errors.lock());
+        let current = errors.entry(bmc.to_string()).or_insert(0);
+        *current = current.saturating_add(count);
     }
 
     /// 指定 BMC 累计失败资源数；从未记录过时为 0。
@@ -55,20 +61,58 @@ impl Snapshot {
             .unwrap_or(0)
     }
 
-    /// 插入或替换指定 BMC 的快照（原子，按 BMC 隔离）。发布时编码一次存入条目，
-    /// /metrics 直接拼接预编码字节（编码成本移出请求路径）。
+    /// 插入或替换指定 BMC 的快照，并把全部 registry 合并成一份 exposition。
+    /// 同名指标族的样本被合并后只编码一组 HELP/TYPE；全局 build_info 只保留一份。
+    /// inner 写锁覆盖合并过程，从而并发 update 不会以旧结果覆盖新结果。
     pub fn update(&self, bmc_name: &str, registry: Arc<prometheus::Registry>) {
-        // 顺序说明：先在 scratch 锁内 encode + clone，释放 scratch 锁后再取 inner 写锁
-        // 插入——写锁只覆盖 insert 本身，发布路径的序列化面最小（scratch 为复用缓冲，
-        // 其锁只在编码期间被持有，不与写锁重叠）。
-        let encoded = {
+        let mut inner = recover_lock(self.inner.write());
+        inner.insert(bmc_name.to_string(), Arc::new(RegistryEntry { registry }));
+
+        let mut names: Vec<_> = inner.keys().cloned().collect();
+        names.sort_unstable();
+        let mut families: BTreeMap<String, prometheus::proto::MetricFamily> = BTreeMap::new();
+        for name in names {
+            for mut family in inner[&name].registry.gather() {
+                let family_name = family.name().to_string();
+                match families.entry(family_name) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(family);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        let existing = entry.get_mut();
+                        // build_info is exporter-global and identical in every per-BMC registry.
+                        if existing.name() == BUILD_INFO.0 {
+                            continue;
+                        }
+                        assert_eq!(
+                            existing.help(),
+                            family.help(),
+                            "metric help changed across BMCs"
+                        );
+                        assert_eq!(
+                            existing.type_(),
+                            family.type_(),
+                            "metric type changed across BMCs"
+                        );
+                        existing.mut_metric().append(family.mut_metric());
+                    }
+                }
+            }
+        }
+
+        let families: Vec<_> = families.into_values().collect();
+        let bytes = {
             let mut scratch = recover_lock(self.scratch.lock());
             scratch.clear();
-            encode_bytes_into(&registry, &mut scratch);
-            scratch.clone()
+            encode_metric_families_into(&families, &mut scratch);
+            Bytes::copy_from_slice(&scratch)
         };
-        let entry = Arc::new(RegistryEntry { registry, encoded });
-        recover_lock(self.inner.write()).insert(bmc_name.to_string(), entry);
+        *recover_lock(self.encoded.write()) = Some(bytes);
+    }
+
+    /// 返回全部 BMC 的统一预编码 exposition。Bytes clone 仅增加引用计数。
+    pub fn encoded(&self) -> Option<Bytes> {
+        recover_lock(self.encoded.read()).clone()
     }
 
     /// 读取指定 BMC 的快照；该 BMC 从未采集过时为 None。
@@ -81,6 +125,11 @@ impl Snapshot {
     /// 没有任何 BMC 的快照时返回 true（/metrics 据此返回 no-data-yet）。
     pub fn is_empty(&self) -> bool {
         recover_lock(self.inner.read()).is_empty()
+    }
+
+    /// 已发布过至少一轮快照的 BMC 数量。
+    pub fn registry_count(&self) -> usize {
+        recover_lock(self.inner.read()).len()
     }
 
     /// 所有 BMC 的 (name, entry) 快照对，按 BMC 名排序保证输出确定性。
@@ -105,27 +154,35 @@ pub async fn build_registry(
     error_total: u64,
 ) -> Result<Arc<prometheus::Registry>, MetricsError> {
     let registry = prometheus::Registry::new();
-    register_into(&report.metrics, &registry)?;
-    if !report.failed_resources.is_empty() {
-        let up = Metric::gauge(UP.0, UP.1)
-            .label("bmc", bmc_name.to_string())
-            .build(0.0);
-        register_into(&[up], &registry)?;
-    }
+    let mut metrics = report.metrics.clone();
+    let reported_up = metrics
+        .iter()
+        .find(|metric| metric.name == UP.0)
+        .map_or(1.0, |metric| metric.value);
+    metrics.retain(|metric| metric.name != UP.0);
+    let up = Metric::gauge(UP.0, UP.1)
+        .label("bmc", bmc_name.to_string())
+        .build(if report.failed_resources.is_empty() {
+            reported_up
+        } else {
+            0.0
+        });
+    metrics.push(up);
     for resource in &report.failed_resources {
         let error = Metric::gauge(SCRAPE_ERROR.0, SCRAPE_ERROR.1)
             .label("bmc", bmc_name.to_string())
             .label("resource", resource.clone())
             .build(1.0);
-        register_into(&[error], &registry)?;
+        metrics.push(error);
     }
     let build = Metric::gauge(BUILD_INFO.0, BUILD_INFO.1)
         .label("version", env!("CARGO_PKG_VERSION").to_string())
         .build(1.0);
-    register_into(&[build], &registry)?;
-    let errors = Metric::gauge(SCRAPE_ERRORS_TOTAL.0, SCRAPE_ERRORS_TOTAL.1)
+    metrics.push(build);
+    let errors = Metric::counter(SCRAPE_ERRORS_TOTAL.0, SCRAPE_ERRORS_TOTAL.1)
         .label("bmc", bmc_name.to_string())
         .build(error_total as f64);
-    register_into(&[errors], &registry)?;
+    metrics.push(errors);
+    register_into(&metrics, &registry)?;
     Ok(Arc::new(registry))
 }

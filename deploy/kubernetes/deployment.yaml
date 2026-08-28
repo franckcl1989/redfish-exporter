@@ -1,22 +1,9 @@
 # redfish-exporter Kubernetes deployment example.
 # Apply with: kubectl apply -f deploy/kubernetes/deployment.yaml
 #
-# NOTE: the example below keeps BMC credentials in a ConfigMap for simplicity.
-# For production, store the password in a Secret and mount it instead, e.g.:
-#
-#   apiVersion: v1
-#   kind: Secret
-#   metadata:
-#     name: redfish-exporter-config
-#   stringData:
-#     config.yaml: |
-#       bmcs:
-#         - name: bmc1
-#           host: https://10.0.0.1
-#           username: admin
-#           password: <real-password>
-#   ---
-#   ... then mount secretName: redfish-exporter-config at /etc/redfish-exporter
+# Create the password Secret before applying this file; do not commit the value:
+# kubectl create secret generic redfish-exporter-credentials \
+#   --from-literal=bmc1-password='<real-password>'
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -31,11 +18,16 @@ data:
     scrape_interval: "30s"
     scrape_timeout: "15s"
     request_timeout: "10s"
+    collectors:
+      event_logs: false
+      event_log_limit: 500
+      bios_attributes: false
+      bios_attribute_limit: 10000
     bmcs:
       - name: bmc1
         host: https://10.0.0.1
         username: admin
-        password: change-me
+        # Password is supplied by REDFISH_EXPORTER_PASSWORD_BMC1 from a Secret.
         auth: basic
         insecure_skip_verify: false
         ca_cert_file: null
@@ -71,12 +63,18 @@ spec:
       labels:
         app: redfish-exporter
     spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 40
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: redfish-exporter
-          image: ghcr.io/your-org/redfish-exporter:0.1.0
+          image: ghcr.io/franckcl1989/redfish-exporter:0.1.0
+          imagePullPolicy: IfNotPresent
           args:
             - "-c"
             - "/etc/redfish-exporter/config.yaml"
@@ -84,6 +82,12 @@ spec:
             - name: metrics
               containerPort: 9417
               protocol: TCP
+          env:
+            - name: REDFISH_EXPORTER_PASSWORD_BMC1
+              valueFrom:
+                secretKeyRef:
+                  name: redfish-exporter-credentials
+                  key: bmc1-password
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -99,16 +103,20 @@ spec:
               memory: 256Mi
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: 9417
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /healthz
               port: 9417
             initialDelaySeconds: 10
             periodSeconds: 15
+            timeoutSeconds: 2
+            failureThreshold: 3
           volumeMounts:
             - name: config
               mountPath: /etc/redfish-exporter

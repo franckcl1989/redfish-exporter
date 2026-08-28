@@ -41,6 +41,23 @@ fn rejects_missing_ca_file() {
     assert!(build_http_client(&c, std::time::Duration::from_secs(10)).is_err());
 }
 
+#[test]
+fn accepts_multiple_certificates_in_ca_bundle() {
+    let first = rcgen::generate_simple_self_signed(vec!["first.example".into()]).unwrap();
+    let second = rcgen::generate_simple_self_signed(vec!["second.example".into()]).unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "redfish-exporter-ca-bundle-{}.pem",
+        std::process::id()
+    ));
+    std::fs::write(&path, format!("{}{}", first.cert.pem(), second.cert.pem())).unwrap();
+    let mut config = cfg();
+    config.insecure_skip_verify = false;
+    config.ca_cert_file = Some(path.clone());
+    let result = build_http_client(&config, std::time::Duration::from_secs(10));
+    let _ = std::fs::remove_file(path);
+    assert!(result.is_ok());
+}
+
 /// 防回归：create_session 失败（如浪潮响应缺 Name 导致反序列化失败）时，
 /// establish_session 返回 Err 而非 panic。
 #[tokio::test]
@@ -149,11 +166,21 @@ fn redirect_policy_blocks_https_downgrade() {
     let https = url::Url::parse("https://bmc.example/redfish/v1").unwrap();
     let http = url::Url::parse("http://bmc.example/redfish/v1/Systems").unwrap();
     let https2 = url::Url::parse("https://bmc.example/redfish/v1/Systems").unwrap();
+    let other_host = url::Url::parse("https://other.example/redfish/v1").unwrap();
+    let other_port = url::Url::parse("https://bmc.example:8443/redfish/v1").unwrap();
     assert!(
         !decide_redirect(std::slice::from_ref(&https), &http),
         "https->http must be blocked"
     );
     assert!(decide_redirect(&[https], &https2), "https->https allowed");
+    assert!(
+        !decide_redirect(std::slice::from_ref(&https2), &other_host),
+        "cross-host redirects must be blocked"
+    );
+    assert!(
+        !decide_redirect(std::slice::from_ref(&https2), &other_port),
+        "cross-port redirects must be blocked"
+    );
     assert!(
         decide_redirect(std::slice::from_ref(&http), &http),
         "http->http allowed"

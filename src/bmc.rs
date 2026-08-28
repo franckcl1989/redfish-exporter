@@ -45,7 +45,7 @@ pub fn is_unauthorized(err: &nv_redfish::Error<HttpBmc<ReqwestClient>>) -> bool 
     )
 }
 
-/// 判定一次重定向是否放行：拒绝 https→http 降级；最多跟随 9 次重定向
+/// 判定一次重定向是否放行：只允许同源跳转；最多跟随 9 次重定向
 /// （`previous` 含初始 URL，`previous.len() >= 10` 即 10 个 URL = 初始 + 9 跳时停止，
 /// 比 reqwest 默认的 10 跳更严格）。
 /// 达到上限时返回 false（stop）：reqwest 将 3xx 响应原样返回给调用方，
@@ -55,13 +55,13 @@ pub fn decide_redirect(previous: &[url::Url], next: &url::Url) -> bool {
     if previous.len() >= 10 {
         return false;
     }
-    !matches!(
-        previous.last(),
-        Some(prev) if prev.scheme() == "https" && next.scheme() == "http"
-    )
+    previous
+        .last()
+        .is_none_or(|previous| previous.origin() == next.origin())
 }
 
-/// 出站重定向策略：阻止 TLS 降级（https→http），其余最多跟随 9 跳（见 decide_redirect）。
+/// 出站重定向策略：阻止跨源跳转（含 TLS 降级、主机或端口变化），
+/// 同源最多跟随 9 跳（见 decide_redirect）。
 /// 注意：reqwest 自定义 policy 不自动限制跳数（文档明确），故跳数上限在 decide_redirect 内实现。
 pub fn no_downgrade_redirect() -> Policy {
     Policy::custom(|attempt| {
@@ -80,7 +80,7 @@ pub fn build_http_client(
     let mut builder = reqwest::Client::builder()
         .timeout(request_timeout)
         .connect_timeout(std::time::Duration::from_secs(5))
-        .user_agent("nv-redfish/v1")
+        .user_agent(concat!("redfish-exporter/", env!("CARGO_PKG_VERSION")))
         .redirect(no_downgrade_redirect());
     if cfg.insecure_skip_verify {
         builder = builder.danger_accept_invalid_certs(true);
@@ -88,9 +88,11 @@ pub fn build_http_client(
     if let Some(ca) = &cfg.ca_cert_file {
         let pem =
             std::fs::read(ca).with_context(|| format!("read ca_cert_file '{}'", ca.display()))?;
-        let cert = reqwest::Certificate::from_pem(&pem)
+        let certificates = reqwest::Certificate::from_pem_bundle(&pem)
             .with_context(|| format!("parse ca_cert_file '{}'", ca.display()))?;
-        builder = builder.add_root_certificate(cert);
+        for certificate in certificates {
+            builder = builder.add_root_certificate(certificate);
+        }
     }
     let client = builder.build().map_err(anyhow::Error::new)?;
     Ok(nv_redfish::bmc_http::reqwest::Client::with_client(client))

@@ -56,15 +56,10 @@ allow = [
   "Apache-2.0",
   "MIT",
   "ISC",
-  "BSD-2-Clause",
   "BSD-3-Clause",
-  "Zlib",
   "Unicode-3.0",
-  "OpenSSL",
 ]
-# 说明：OpenSSL 为 ring 许可证表达式组成部分（rustls 栈既有依赖）；
-# BSD-2-Clause、Zlib 为历史 rustls 栈条目，当前树未使用，保留以防回归。
-# MPL-2.0 已移除：cargo deny list 确认当前依赖树无任何 crate 使用。
+# 未使用的许可不预先放行；依赖树出现新许可时必须审查后显式添加。
 # 若 cargo deny check licenses 报出清单外许可证，仅可添加 OSI/FSF 批准的许可证并附理由，禁止 "*"。
 
 # CDLA-Permissive-2.0 是 webpki-roots 1.x 根证书数据包的许可证（数据许可，rustls 维护者有意选择，

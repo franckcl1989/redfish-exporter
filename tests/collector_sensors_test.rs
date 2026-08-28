@@ -90,6 +90,10 @@ async fn collects_sensor_readings_and_thresholds() {
     let labels: HashMap<_, _> = r.labels.iter().map(|(k, v)| (*k, v.as_str())).collect();
     assert_eq!(labels.get("bmc"), Some(&"bmc1"));
     assert_eq!(labels.get("chassis"), Some(&"1"));
+    assert_eq!(
+        labels.get("id"),
+        Some(&"/redfish/v1/Chassis/1/Sensors/Ambient")
+    );
     assert_eq!(labels.get("name"), Some(&"Ambient"));
     assert_eq!(labels.get("units"), Some(&"Cel"));
     assert_eq!(labels.get("sensor_type"), Some(&"Temperature"));
@@ -291,7 +295,14 @@ async fn collect_groups_reports_up_duration_and_sensor_metrics() {
 
     let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
     let fast = collect_fast(Arc::clone(&bmc), &root, "bmc1").await.unwrap();
-    let slow = collect_slow(Arc::clone(&bmc), &root, "bmc1").await.unwrap();
+    let slow = collect_slow(
+        Arc::clone(&bmc),
+        &root,
+        "bmc1",
+        redfish_exporter::config::CollectorsConfig::all_enabled(),
+    )
+    .await
+    .unwrap();
     let merged = merge_reports(fast, Some(&slow));
     let report = finalize_report(
         "bmc1",
