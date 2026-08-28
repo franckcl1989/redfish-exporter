@@ -11,9 +11,12 @@ firmware versions, network path, and Prometheus deployment.
   full tests, documentation, actionlint, promtool, performance/resource guards,
   short soak, graceful-shutdown smoke, dependency policy, and production
   container smoke.
-- Run the release commit in staging for at least two hours against every BMC
-  vendor/model/firmware family planned for the first rollout. Use least-privilege
-  read-only Redfish accounts and the same TLS/CA and proxy path as production.
+- For the 0.1.0 validation profile, run the release commit in staging for at
+  least 24 minutes against every BMC vendor/model/firmware family planned for
+  the first rollout. The run must include the initial full collection, at least
+  one subsequent slow-group refresh, and at least ten fast-group refreshes. Use
+  least-privilege read-only Redfish accounts and the same TLS/CA and proxy path
+  as production.
 - Confirm `redfish_up == 1`, no persistent `redfish_scrape_error`, stable process
   RSS, acceptable BMC request load, expected metric cardinality, and successful
   dashboard/alert evaluation. Investigate unsupported resources; do not hide
@@ -27,6 +30,9 @@ firmware versions, network path, and Prometheus deployment.
   verification (`ca_cert_file`) rather than `insecure_skip_verify`.
 - Record the approved image digest and retain the previous known-good digest for
   rollback. Review `CHANGELOG.md` and ensure `Cargo.toml` is version `0.1.0`.
+
+The completed 0.1.0 candidate evidence is recorded in
+[`docs/audit/2026-08-28-release-candidate.md`](audit/2026-08-28-release-candidate.md).
 
 ## Publish and verify
 
@@ -47,7 +53,8 @@ gh attestation verify redfish-exporter-0.1.0-linux-amd64.tar.gz \
 
 Deploy by immutable image digest, not a mutable semver tag. Start with one
 canary BMC group, verify at least two complete scrape intervals plus the alerts
-and readiness probe, then expand gradually.
+and readiness probe, then expand gradually. The 24-minute release gate is not a
+substitute for post-deployment memory, cardinality, and BMC-load monitoring.
 
 ## Rollback
 
