@@ -12,6 +12,7 @@ pub mod systems;
 use crate::metrics::{HEALTH_STATUS, INFO, Metric, SCRAPE_DURATION, UP, health_state_labels};
 use nv_redfish::schema::resource::{Health, Status};
 use nv_redfish::{Bmc, ServiceRoot};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -57,10 +58,19 @@ pub(crate) fn push_health(
     );
 }
 
-pub(crate) fn push_info(out: &mut Vec<Metric>, bmc: &str, key: &str, value: &str) {
+pub(crate) fn push_info(
+    out: &mut Vec<Metric>,
+    bmc: &str,
+    resource_type: &str,
+    id: &str,
+    key: &str,
+    value: &str,
+) {
     out.push(
         Metric::gauge(INFO.0, INFO.1)
             .label("bmc", bmc.to_string())
+            .label("resource_type", resource_type.to_string())
+            .label("id", id.to_string())
             .label("key", key.to_string())
             .label("value", value.to_string())
             .build(1.0),
@@ -257,7 +267,11 @@ pub fn finalize_report(
     failed: Vec<String>,
     started: Instant,
 ) -> ScrapeReport {
-    let mut metrics = metrics;
+    // Redfish allows the same Sensor resource to be reachable through more than one
+    // navigation path (for example Chassis/Sensors and EnvironmentMetrics). Keep one
+    // sample for an exact descriptor+label identity. Descriptor/type conflicts and
+    // duplicate label keys are deliberately left intact for register_into to reject.
+    let mut metrics = deduplicate_exact_series(metrics);
     let up = if failed.is_empty() { 1.0 } else { 0.0 };
     metrics.push(
         Metric::gauge(UP.0, UP.1)
@@ -273,6 +287,33 @@ pub fn finalize_report(
         metrics,
         failed_resources: failed,
     }
+}
+
+fn deduplicate_exact_series(metrics: Vec<Metric>) -> Vec<Metric> {
+    let mut seen = HashMap::with_capacity(metrics.len());
+    let mut unique = Vec::with_capacity(metrics.len());
+    for metric in metrics {
+        let mut labels = metric.labels.clone();
+        labels.sort_unstable();
+        let key = (metric.name, metric.help, metric.kind, labels);
+        match seen.entry(key) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(metric.value);
+                unique.push(metric);
+            }
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                if entry.get().to_bits() != metric.value.to_bits() {
+                    tracing::warn!(
+                        metric = metric.name,
+                        first_value = *entry.get(),
+                        duplicate_value = metric.value,
+                        "duplicate Redfish series observed through multiple navigation paths; keeping first value"
+                    );
+                }
+            }
+        }
+    }
+    unique
 }
 
 pub fn merge_reports(fast: ScrapeReport, slow: Option<&ScrapeReport>) -> ScrapeReport {

@@ -1,7 +1,9 @@
 use nv_redfish::ServiceRoot;
 use nv_redfish::core::ODataId;
 use nv_redfish_bmc_mock::{Bmc as MockBmc, Expect};
-use redfish_exporter::collector::systems::{collect_firmware, collect_managers, collect_systems};
+use redfish_exporter::collector::systems::{
+    collect_assembly, collect_firmware, collect_managers, collect_systems,
+};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,6 +36,9 @@ fn expect_service_root(bmc: &Mock, services: &[&str]) -> ODataId {
             "UpdateService" => {
                 payload["UpdateService"] = json!({ "@odata.id": "/redfish/v1/UpdateService" });
             }
+            "Chassis" => {
+                payload["Chassis"] = json!({ "@odata.id": "/redfish/v1/Chassis" });
+            }
             _ => unreachable!("unexpected service {service}"),
         }
     }
@@ -54,13 +59,13 @@ fn expect_systems_collection(bmc: &Mock) {
     ));
 }
 
-fn expect_system(bmc: &Mock) {
+fn expect_system_with_power(bmc: &Mock, power_state: &str) {
     bmc.expect(Expect::get(
         "/redfish/v1/Systems/1",
         json!({
             "@odata.id": "/redfish/v1/Systems/1",
             "Id": "1", "Name": "System 1", "SystemType": "Physical",
-            "PowerState": "On",
+            "PowerState": power_state,
             "Manufacturer": "Dell", "Model": "R750",
             "SerialNumber": "SN1", "SKU": "SKU1",
             "Status": { "Health": "OK", "State": "Enabled" },
@@ -73,7 +78,7 @@ async fn collects_system_power_and_health() {
     let bmc = Arc::new(Mock::default());
     expect_service_root(&bmc, &["Systems"]);
     expect_systems_collection(&bmc);
-    expect_system(&bmc);
+    expect_system_with_power(&bmc, "On");
 
     let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
     let metrics = collect_systems(bmc, &root, "bmc1").await.unwrap();
@@ -97,7 +102,7 @@ async fn collects_system_power_and_health() {
     let labels = labels_of(health[0]);
     assert_eq!(labels.get("bmc"), Some(&"bmc1"));
     assert_eq!(labels.get("resource_type"), Some(&"system"));
-    assert_eq!(labels.get("id"), Some(&"1"));
+    assert_eq!(labels.get("id"), Some(&"/redfish/v1/Systems/1"));
     assert_eq!(labels.get("health"), Some(&"OK"));
     assert_eq!(labels.get("state"), Some(&"Enabled"));
 
@@ -119,6 +124,22 @@ async fn collects_system_power_and_health() {
     assert_eq!(info_values.get("model"), Some(&"R750"));
     assert_eq!(info_values.get("serial_number"), Some(&"SN1"));
     assert_eq!(info_values.get("sku"), Some(&"SKU1"));
+}
+
+#[tokio::test]
+async fn known_non_on_power_state_is_exported_as_zero() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc, &["Systems"]);
+    expect_systems_collection(&bmc);
+    expect_system_with_power(&bmc, "Off");
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_systems(bmc, &root, "bmc1").await.unwrap();
+    let power = metrics
+        .iter()
+        .find(|metric| metric.name == "redfish_power_state")
+        .expect("known power state must emit a time series");
+    assert_eq!(power.value, 0.0);
 }
 
 #[tokio::test]
@@ -181,7 +202,10 @@ async fn collects_firmware_inventory() {
     let labels = labels_of(health[0]);
     assert_eq!(labels.get("bmc"), Some(&"bmc1"));
     assert_eq!(labels.get("resource_type"), Some(&"software_inventory"));
-    assert_eq!(labels.get("id"), Some(&"1"));
+    assert_eq!(
+        labels.get("id"),
+        Some(&"/redfish/v1/UpdateService/FirmwareInventory/1")
+    );
     assert_eq!(labels.get("health"), Some(&"OK"));
     assert_eq!(labels.get("state"), Some(&"Enabled"));
 }
@@ -198,4 +222,36 @@ async fn missing_services_are_ok() {
     assert!(firmware.is_empty());
     let managers = collect_managers(bmc, &root, "bmc1").await.unwrap();
     assert!(managers.is_empty());
+}
+
+#[tokio::test]
+async fn all_declared_assembly_resources_failing_is_an_error() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc, &["Chassis"]);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis",
+            "@odata.type": "#ChassisCollection.ChassisCollection",
+            "Name": "Chassis",
+            "Members": [{ "@odata.id": "/redfish/v1/Chassis/1" }],
+        }),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/1",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis/1",
+            "Id": "1", "Name": "Chassis 1", "ChassisType": "RackMount",
+            "Assembly": { "@odata.id": "/redfish/v1/Chassis/1/Assembly" },
+        }),
+    ));
+    // No Assembly response: the only declared resource fails.
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let error = collect_assembly(bmc, &root, "bmc1")
+        .await
+        .expect_err("declared Assembly resource must not fail silently");
+    assert!(
+        error.contains("all 1/1 declared resources failed"),
+        "{error}"
+    );
 }

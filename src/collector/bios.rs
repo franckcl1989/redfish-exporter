@@ -25,11 +25,27 @@ pub async fn collect_bios<B: Bmc>(
         .members()
         .await
         .map_err(|e| format!("systems members: {e}"))?;
+    let mut attempted = 0usize;
+    let mut failed = 0usize;
     for system in systems {
         let system_id = system.id().to_string();
-        // BIOS 解析失败（如属性值含列表/对象）时跳过该系统
-        let Ok(Some(bios)) = system.bios().await else {
-            continue;
+        let bios = match system.bios().await {
+            Ok(Some(bios)) => {
+                attempted += 1;
+                bios
+            }
+            Ok(None) => continue,
+            Err(error) => {
+                attempted += 1;
+                failed += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    system = %system_id,
+                    error = %error,
+                    "BIOS resource fetch or parse failed"
+                );
+                continue;
+            }
         };
         let raw = bios.raw();
         out.push(
@@ -48,6 +64,11 @@ pub async fn collect_bios<B: Bmc>(
         for (name, value) in &attrs.dynamic_properties {
             push_attribute(&mut out, bmc_name, &system_id, name, value);
         }
+    }
+    if attempted > 0 && failed == attempted {
+        return Err(format!(
+            "bios: all {failed}/{attempted} declared resources failed"
+        ));
     }
     Ok(out)
 }

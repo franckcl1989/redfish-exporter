@@ -1,5 +1,5 @@
 //! 长稳 soak（#[ignore]，发布前手动运行）：
-//!   cargo test --release --test soak_test -- --ignored
+//!   cargo test --profile release-gates --test soak_test -- --ignored
 //! 时长由 SOAK_SECS 环境变量控制（默认 14400s=4h，验收实跑 ≥7200s）。
 //! 健康 MockBmc 长期循环：断言轮耗时稳定、无失败资源、输出大小恒定、RSS 无泄漏式增长。
 

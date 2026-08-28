@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use tokio::sync::{RwLock, watch};
-use tracing::{debug, error, info};
+use tokio::sync::watch;
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use redfish_exporter::config;
@@ -15,6 +15,7 @@ use redfish_exporter::registry::Snapshot;
 use redfish_exporter::scraper::Scraper;
 
 #[derive(clap::Parser)]
+#[command(version, about)]
 struct Args {
     /// Path to the configuration file
     #[arg(short, long, default_value = "config.yaml")]
@@ -30,8 +31,12 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&args.log_level));
+    let filter = if std::env::var_os("RUST_LOG").is_some() {
+        EnvFilter::try_from_default_env().context("invalid RUST_LOG filter")?
+    } else {
+        EnvFilter::try_new(&args.log_level)
+            .with_context(|| format!("invalid --log-level filter: {}", args.log_level))?
+    };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let mut cfg = config::load_config(&args.config)
@@ -47,80 +52,88 @@ async fn main() -> anyhow::Result<()> {
         cfg.listen_addr.set_port(port);
     }
 
-    let cfg = Arc::new(RwLock::new(cfg));
+    let cfg = Arc::new(cfg);
     let snapshot = Arc::new(Snapshot::new());
-    let scraper_cfg = cfg.read().await;
-    let scraper = Scraper::new(&scraper_cfg, Arc::clone(&snapshot)).await?;
-    drop(scraper_cfg);
+    let scraper = Scraper::new(&cfg, Arc::clone(&snapshot))?;
     let (stop_tx, stop_rx) = watch::channel(false);
 
-    let serve_fut = serve(cfg, snapshot, args.config, stop_rx.clone());
+    let serve_fut = serve(cfg, snapshot, stop_rx.clone());
     let scraper_handle = scraper.run(stop_rx);
-    let shutdown = async {
-        shutdown_signal().await;
-        info!("shutdown signal received");
-        let _ = stop_tx.send(true);
-    };
-    tokio::pin!(serve_fut, scraper_handle, shutdown);
+    tokio::pin!(serve_fut, scraper_handle);
 
-    let serve_result = tokio::select! {
-        result = &mut serve_fut => result,
-        scraper_result = &mut scraper_handle => {
-            // 正常 shutdown 时 stop 信号已发出，scraper 正常 break（Ok），
-            // 此时与 shutdown 分支竞争触发本分支：仅记 debug。
-            match scraper_result {
-                Ok(()) => {
-                    debug!("scraper task ended without stop signal");
-                    let _ = stop_tx.send(true);
-                    serve_fut.await
-                }
-                Err(e) => {
-                    error!(error = %e, "scraper task panicked or aborted");
-                    std::process::exit(1);
-                }
-            }
-        }
-        _ = &mut shutdown => {
-            let (serve_result, scraper_result) = tokio::join!(&mut serve_fut, &mut scraper_handle);
-            if let Err(e) = scraper_result {
-                error!(error = %e, "scraper task panicked or aborted");
-                std::process::exit(1);
-            }
-            serve_result
+    enum Exit {
+        Signal,
+        Http(anyhow::Result<()>),
+        Scraper(Result<(), tokio::task::JoinError>),
+    }
+
+    let exit = tokio::select! {
+        result = &mut serve_fut => Exit::Http(result),
+        result = &mut scraper_handle => Exit::Scraper(result),
+        result = shutdown_signal() => {
+            result?;
+            info!("shutdown signal received");
+            Exit::Signal
         }
     };
-    serve_result?;
+    let _ = stop_tx.send(true);
+
+    const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    match exit {
+        Exit::Signal => {
+            // 两边都依赖 stop watch 推进退出；并发轮询，避免串行等待把总退出时长
+            // 放大到 2 × SHUTDOWN_TIMEOUT，也确保 HTTP graceful shutdown 立即被驱动。
+            let (scraper_result, http_result) = tokio::join!(
+                tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut scraper_handle),
+                tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut serve_fut),
+            );
+            scraper_result
+                .context("scraper shutdown timed out")?
+                .context("scraper task panicked or was aborted")?;
+            http_result.context("HTTP shutdown timed out")??;
+        }
+        Exit::Http(result) => {
+            let scraper_result = tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut scraper_handle)
+                .await
+                .context("scraper cleanup timed out after HTTP server exit")?;
+            scraper_result.context("scraper task panicked or was aborted")?;
+            result?;
+            anyhow::bail!("HTTP server stopped unexpectedly");
+        }
+        Exit::Scraper(result) => {
+            // 即使 scraper panic，也先完成 HTTP graceful shutdown，再返回根因。
+            let scraper_result = result.context("scraper task panicked or was aborted");
+            let http_result = tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut serve_fut)
+                .await
+                .context("HTTP shutdown timed out after scraper exit")
+                .and_then(|result| result);
+            scraper_result?;
+            http_result?;
+            anyhow::bail!("scraper stopped unexpectedly");
+        }
+    }
     info!("shutdown complete");
     Ok(())
 }
 
 /// 等待 SIGINT（Ctrl+C）或 SIGTERM（Unix）；Windows 仅支持 Ctrl+C。
-async fn shutdown_signal() {
+async fn shutdown_signal() -> anyhow::Result<()> {
     let ctrl_c = async {
-        match tokio::signal::ctrl_c().await {
-            Ok(()) => {}
-            Err(e) => {
-                tracing::error!(error = %e, "failed to install Ctrl+C handler");
-                std::process::exit(1);
-            }
-        }
+        tokio::signal::ctrl_c()
+            .await
+            .context("failed to install Ctrl+C handler")
     };
     #[cfg(unix)]
     let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut sig) => {
-                sig.recv().await;
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "failed to install SIGTERM handler");
-                std::process::exit(1);
-            }
-        }
+        let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .context("failed to install SIGTERM handler")?;
+        signal.recv().await;
+        Ok::<(), anyhow::Error>(())
     };
     #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
+    let terminate = std::future::pending::<anyhow::Result<()>>();
     tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+        result = ctrl_c => result,
+        result = terminate => result,
     }
 }

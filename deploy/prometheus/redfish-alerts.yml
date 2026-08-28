@@ -22,7 +22,7 @@ groups:
           description: "Resource {{ $labels.resource }} on BMC {{ $labels.bmc }} failed to be collected (redfish_scrape_error == 1)."
 
       - alert: RedfishSensorCritical
-        expr: redfish_sensor_reading >= on(bmc, chassis, name) redfish_sensor_threshold_upper_critical
+        expr: redfish_sensor_reading >= on(bmc, chassis, id) redfish_sensor_threshold_upper_critical
         for: 5m
         labels:
           severity: critical

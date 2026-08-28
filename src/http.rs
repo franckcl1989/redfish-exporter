@@ -1,5 +1,4 @@
 use std::net::TcpListener as StdTcpListener;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,45 +9,41 @@ use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum_server::tls_rustls::RustlsConfig;
-use tokio::sync::{RwLock, watch};
+use tokio::sync::watch;
 use tracing::info;
 
 use crate::auth::bearer_authorized;
-use crate::config::{Config, SecretString, load_config};
+use crate::config::{Config, SecretString};
 use crate::registry::Snapshot;
 
 const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
-/// HTTP 路由共享状态：指标快照 + 运行时配置（/reload 热替换）+ 配置文件路径 + 启动时 token。
+/// HTTP 路由共享状态：指标快照、预期 BMC 数和启动时 token。
 #[derive(Clone)]
 struct AppState {
     snapshot: Arc<Snapshot>,
-    config: Arc<RwLock<Config>>,
-    config_path: PathBuf,
+    expected_bmcs: usize,
     auth_token: Option<SecretString>,
 }
 
-/// 构造 HTTP 路由：`/metrics`、`/healthz`、`/info`、`/discover`、`/reload`。
+/// 构造 HTTP 路由：`/metrics`、`/healthz`、`/readyz`、`/info`。
 pub fn router(
     snapshot: Arc<Snapshot>,
-    config: Arc<RwLock<Config>>,
-    config_path: PathBuf,
+    expected_bmcs: usize,
     auth_token: Option<SecretString>,
 ) -> Router {
     let state = AppState {
         snapshot,
-        config,
-        config_path,
+        expected_bmcs,
         auth_token,
     };
     Router::new()
         .route("/metrics", get(metrics_handler))
         .route("/healthz", get(healthz_handler))
+        .route("/readyz", get(readyz_handler))
         .route("/info", get(info_handler))
-        .route("/discover", get(discover_handler))
-        .route("/reload", post(reload_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -56,14 +51,16 @@ pub fn router(
         .with_state(state)
 }
 
-/// Bearer 认证中间件：配置了 token 时全部端点（含 /healthz、/reload）统一要求认证。
-/// 401 + `WWW-Authenticate: Bearer`；未配置 token 时直通（默认安全基线外的显式选择）。
+/// Bearer 认证中间件：探针端点始终公开，其余端点在配置 token 后要求认证。
+/// 401 + `WWW-Authenticate: Bearer`；未配置 token 时直通。
 async fn auth_middleware(
     State(state): State<AppState>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    if let Some(token) = &state.auth_token
+    let is_probe = matches!(req.uri().path(), "/healthz" | "/readyz");
+    if !is_probe
+        && let Some(token) = &state.auth_token
         && !bearer_authorized(req.headers(), token.expose())
     {
         return (
@@ -77,21 +74,18 @@ async fn auth_middleware(
 }
 
 async fn metrics_handler(State(state): State<AppState>) -> Response {
-    if state.snapshot.is_empty() {
+    let Some(body) = state.snapshot.encoded() else {
         let mut headers = HeaderMap::new();
         headers.insert(
             HeaderName::from_static("x-redfish-exporter"),
             HeaderValue::from_static("no-data-yet"),
         );
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static(PROMETHEUS_CONTENT_TYPE),
+        );
         return (StatusCode::OK, headers, "").into_response();
-    }
-    // 预编码字节直接拼接（发布时已编码）；registries() 按 BMC 名排序，输出确定性不变。
-    let entries = state.snapshot.registries();
-    let total: usize = entries.iter().map(|(_, e)| e.encoded.len()).sum();
-    let mut body: Vec<u8> = Vec::with_capacity(total);
-    for (_, entry) in &entries {
-        body.extend_from_slice(&entry.encoded);
-    }
+    };
     (
         StatusCode::OK,
         [(CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],
@@ -104,6 +98,14 @@ async fn healthz_handler() -> &'static str {
     "ok"
 }
 
+async fn readyz_handler(State(state): State<AppState>) -> Response {
+    if state.snapshot.registry_count() >= state.expected_bmcs {
+        (StatusCode::OK, "ready").into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response()
+    }
+}
+
 /// 构建信息（版本、Rust 版本、目标 OS/架构），供运维定位部署产物。
 async fn info_handler() -> Json<serde_json::Value> {
     Json(serde_json::json!({
@@ -112,31 +114,6 @@ async fn info_handler() -> Json<serde_json::Value> {
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
     }))
-}
-
-/// Prometheus HTTP SD 格式：单条 entry，targets 为全部 BMC 的 host。
-async fn discover_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let cfg = state.config.read().await;
-    let targets: Vec<String> = cfg
-        .bmcs
-        .iter()
-        .map(|b| b.host.as_str().to_string())
-        .collect();
-    Json(serde_json::json!([{ "targets": targets }]))
-}
-
-/// 重新读取并校验配置文件；成功后热替换运行时配置，失败返回 400 并保留旧配置。
-/// 注意：BMC 增删/凭据变更需重启生效（scraper 不重建，见差距表）。
-async fn reload_handler(State(state): State<AppState>) -> Response {
-    let path = &state.config_path;
-    match load_config(path) {
-        Ok(new_cfg) => {
-            *state.config.write().await = new_cfg;
-            info!(path = %path.display(), "config reloaded");
-            "ok".into_response()
-        }
-        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-    }
 }
 
 /// 默认 HTTP/1.1 header 读取超时（慢连接防护，spec §3.1）。
@@ -186,8 +163,12 @@ pub async fn serve_on(
     let handle = axum_server::Handle::new();
     let shutdown_handle = handle.clone();
     tokio::spawn(async move {
-        let _ = stop.changed().await;
-        shutdown_handle.graceful_shutdown(None);
+        while !*stop.borrow() {
+            if stop.changed().await.is_err() {
+                break;
+            }
+        }
+        shutdown_handle.graceful_shutdown(Some(Duration::from_secs(25)));
     });
     match tls {
         // TLS 与纯 HTTP 语义一致：header 读超时覆盖"握手/连接后零字节"的慢连接。
@@ -229,15 +210,13 @@ fn http1_server<Acc>(
 
 /// 绑定 `cfg.listen_addr` 并启动 HTTP 服务；`stop` 触发后优雅关闭。
 pub async fn serve(
-    config: Arc<RwLock<Config>>,
+    config: Arc<Config>,
     snapshot: Arc<Snapshot>,
-    config_path: PathBuf,
     stop: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let (listen_addr, web) = {
-        let cfg = config.read().await;
-        (cfg.listen_addr, cfg.web.clone())
-    };
+    let listen_addr = config.listen_addr;
+    let web = config.web.clone();
+    let expected_bmcs = config.bmcs.len();
     let tls = load_tls(&web).await?;
     let listener = StdTcpListener::bind(listen_addr)
         .with_context(|| format!("failed to bind listen address {listen_addr}"))?;
@@ -245,7 +224,7 @@ pub async fn serve(
     let auth_token = web.auth_token.clone();
     serve_on(
         listener,
-        router(snapshot, config, config_path, auth_token),
+        router(snapshot, expected_bmcs, auth_token),
         tls,
         DEFAULT_HEADER_READ_TIMEOUT,
         stop,

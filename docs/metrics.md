@@ -1,6 +1,6 @@
 # Metrics reference
 
-All metrics are **Gauge** type. Metric names, help strings and labels below are extracted from the implementation (`src/metrics.rs` constants and the collectors in `src/collector/`) and are authoritative for version 0.1.0.
+Metrics are Gauges unless their name ends in `_total`; `_total` families are Prometheus Counters. Metric names, help strings and labels below are extracted from the implementation (`src/metrics.rs` constants and the collectors in `src/collector/`) and are authoritative for version 0.1.0.
 
 Values are pushed on every scrape; labels whose source field is absent on the BMC are emitted as the empty string (or `unknown` for health/state). The Prometheus registry is rebuilt per BMC per round from the scrape snapshot.
 
@@ -14,9 +14,9 @@ Values are pushed on every scrape; labels whose source field is absent on the BM
 | `manager`      | Manager resource id                                             |
 | `service`      | LogService resource id                                          |
 | `attribute`    | BIOS attribute name                                             |
-| `id`           | Resource id of the reported entity (processor, memory module, drive, volume, ethernet interface, PCIe device, log entry, power supply, storage controller, system/chassis LED) |
+| `id`           | Stable identity of the reported entity. For `redfish_health_status`, `redfish_info`, and sensor families this is the full Redfish `@odata.id` URI (including a fragment for embedded legacy members); specialized families retain the native leaf resource/member id and include parent labels where needed. |
 | `storage`      | Storage (storage controller) resource id                        |
-| `resource_type`| Redfish resource type reported by `redfish_health_status` / `redfish_indicator_led` (`system` / `chassis`) |
+| `resource_type`| Redfish resource type reported by health, inventory and indicator metrics |
 | `health`       | `OK` / `Warning` / `Critical` / `UnsupportedValue` / `unknown` |
 | `state`        | Resource state (e.g. `Enabled`) / `unknown`                    |
 | `status`       | Storage controller state (`StorageControllers[].Status.State`) |
@@ -38,17 +38,19 @@ Values are pushed on every scrape; labels whose source field is absent on the BM
 | `redfish_scrape_errors_total`      | `bmc`                        | Total number of failed resources across all scrape rounds | cumulative counter in `Snapshot` (`registry.rs`), incremented per failed resource and once per failed/timed-out round |
 | `redfish_build_info`               | `version`                    | Build information                                        | exporter crate version (`build_registry`, `registry.rs`), always `1.0` |
 | `redfish_health_status`            | `bmc`, `resource_type`, `id`, `health`, `state` | Health and state of a resource      | `Status.Health` + `Status.State` of any collected resource; always `1.0` |
-| `redfish_info`                     | `bmc`, `key`, `value`        | Static key-value information about a BMC                 | inventory fields, always `1.0` |
+| `redfish_info`                     | `bmc`, `resource_type`, `id`, `key`, `value` | Resource-scoped static key-value information | inventory fields, always `1.0` |
 
 `redfish_health_status` `resource_type` values: `system`, `chassis`, `manager`, `processor`, `memory`, `drive`, `volume`, `ethernet_interface`, `network_adapter`, `port`, `pcie_device`, `assembly`, `software_inventory`.
 
 `redfish_info` keys: `manufacturer`, `model`, `processor_type`, `part_number`, `memory_type`, `serial_number`, `revision`, `sku`, `firmware_version`, `software_version`, `producer`, `mac_address`, `name`.
 
+The generic health/info families use `@odata.id`, rather than a leaf `Id`, so resources such as `DIMM1` under different ComputerSystems cannot collapse into the same Prometheus series.
+
 ### Sensors (chassis)
 
 | Metric                                      | Labels                                                        | Help text from code      | Source |
 |---------------------------------------------|---------------------------------------------------------------|--------------------------|--------|
-| `redfish_sensor_reading`                    | `bmc`, `chassis`, `name`, `units`, `sensor_type`, `health`, `state` | Sensor reading     | Chassis sensor links (`sensors.rs`), legacy `Thermal` temperatures, power supply sensors, `EnvironmentMetrics` sensors, `Controls` (`power.rs`) |
+| `redfish_sensor_reading`                    | `bmc`, `chassis`, `id`, `name`, `units`, `sensor_type`, `health`, `state` | Sensor reading     | Chassis sensor links (`sensors.rs`), legacy `Thermal` temperatures, power supply sensors, `EnvironmentMetrics` sensors, `Controls` (`power.rs`) |
 | `redfish_sensor_threshold_upper_critical`   | same as above                                                 | Sensor threshold         | `Thresholds.upper_critical` |
 | `redfish_sensor_threshold_upper_warning`    | same as above                                                 | Sensor threshold         | `Thresholds.upper_caution` |
 | `redfish_sensor_threshold_lower_warning`    | same as above                                                 | Sensor threshold         | `Thresholds.lower_caution` |
@@ -107,7 +109,7 @@ Note: PSU metrics are read from the legacy Power document (embedded `PowerSuppli
 | `redfish_drive_info`                         | `bmc`, `system`, `storage`, `id`, `wwn` | Drive vendor identifier information, 1 = present | `Oem.Dell.DellPhysicalDisk.WWN` (Dell only); series emitted only when the field is present |
 | `redfish_drive_oem_status`                   | `bmc`, `system`, `storage`, `id`, `raid_status`, `power_status` | Drive vendor OEM status, 1 = present with status labels | `Oem.Dell.DellPhysicalDisk.RaidStatus` / `PowerStatus` (Dell only); emitted when at least one of the two is present |
 
-Note: the `redfish_drive_io_*_errors_total` and `redfish_scrape_errors_total` metrics follow counter naming conventions (`_total` suffix) but are registered as **Gauge** carrying the last scraped (or cumulative) value, consistent with the snapshot-cache design.
+The `redfish_drive_io_*_errors_total` and `redfish_scrape_errors_total` families are registered as Prometheus Counters. Their absolute values are rebuilt from the latest BMC reading/cumulative exporter state, so they remain monotonic while the source BMC and exporter process do not reset.
 
 ### Network
 
@@ -115,14 +117,14 @@ Note: the `redfish_drive_io_*_errors_total` and `redfish_scrape_errors_total` me
 |----------------------------------------|-----------------------|----------------------------------------------------------|--------|
 | `redfish_ethernet_interface_link_status`| `bmc`, `system`, `id` | Ethernet link status, 1 = up                             | `EthernetInterface.link_status` (1 = LinkUp, 0 = otherwise) |
 | `redfish_ethernet_interface_speed_mbps` | `bmc`, `system`, `id` | Ethernet link speed in Mbps                              | `EthernetInterface.speed_mbps` |
-| `redfish_pcie_device_lanes_in_use`     | `bmc`, `id`           | Number of PCIe lanes in use by the device                | `PcieInterface.lanes_in_use` |
-| `redfish_pcie_device_max_lanes`        | `bmc`, `id`           | Maximum number of PCIe lanes supported by the device     | `PcieInterface.max_lanes` |
+| `redfish_pcie_device_lanes_in_use`     | `bmc`, `chassis`, `id`| Number of PCIe lanes in use by the device                | `PcieInterface.lanes_in_use` |
+| `redfish_pcie_device_max_lanes`        | `bmc`, `chassis`, `id`| Maximum number of PCIe lanes supported by the device     | `PcieInterface.max_lanes` |
 
 ### System
 
 | Metric            | Labels          | Help text from code                | Source |
 |-------------------|-----------------|------------------------------------|--------|
-| `redfish_power_state` | `bmc`, `system` | Power state of a system, 1 = On  | `System.power_state`; series emitted only when the state is `On` |
+| `redfish_power_state` | `bmc`, `system` | Power state of a system, 1 = On and 0 = any other known state | `System.power_state`; absent only when the state is unavailable |
 | `redfish_indicator_led` | `bmc`, `resource_type`, `id`, `state` | Indicator LED state, 1 = present with state label | `IndicatorLED` of Systems (`resource_type="system"`) and Chassis (`resource_type="chassis"`); series emitted only when the field is present |
 
 ### Event log
@@ -141,7 +143,7 @@ Note: the `redfish_drive_io_*_errors_total` and `redfish_scrape_errors_total` me
 | `redfish_bios_attribute_info`     | `bmc`, `system`, `attribute`, `value` | BIOS string attribute       | `Bios.Attributes` string values, always `1.0`; slow group |
 | `redfish_bios_pending_changes`    | `bmc`, `system`            | BIOS settings pending reboot           | presence of `@Redfish.Settings` on the Bios resource (`bios.rs`), 1 = pending; slow group |
 
-Null attribute values (including password fields such as Dell `SysPassword`/Inspur `AdministratorPassword`) are skipped and never exported; a system whose Bios payload fails to parse is skipped entirely (audit ⚠️ for the Inspur 166 KB payload, see 待复验).
+Null attribute values (including password fields such as Dell `SysPassword`/Inspur `AdministratorPassword`) are skipped and never exported. A system whose BIOS payload fails to parse fails the BIOS collector when no other declared BIOS resource succeeds. The IEIT/Inspur 166 KB payload was validated live for 0.1.0 (4,065 numeric/boolean and 1,690 string samples).
 
 ## B. Recorded but not implemented
 
@@ -156,4 +158,3 @@ The following areas were evaluated during 0.1.0 scoping and are deliberately **n
 | `redfish_processor_utilization_percent` | `ProcessorSummary` has no utilization field | collect per-core utilization / `OperatingConfig` once exposed by nv-redfish |
 | `redfish_drive_utilization_percent` | `DriveMetrics` has no utilization field | SMART-based estimate or nv-redfish schema extension |
 | PCIe link rate (GT/s) | `PcieDevice` has no link-speed field | nv-redfish schema extension (needs `PcieDevice.PcieDeviceProperties` extension data) |
-| StorageController health | Storage references are `ReferenceLeaf` (no embedded data); drives/volumes are collected instead | fetch each controller resource individually |

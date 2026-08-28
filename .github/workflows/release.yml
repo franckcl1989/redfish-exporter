@@ -5,48 +5,146 @@ on:
 
 permissions:
   contents: write
+  packages: write
+  attestations: write
+  artifact-metadata: write
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.90.0
           components: clippy, rustfmt
       - name: Check formatting
         run: cargo fmt --check
       - name: Lint (clippy -D warnings)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Run tests
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets --all-features
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit dependencies
+        run: cargo audit
+      - name: Deny policy checks
+        uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
       - name: Check tag matches Cargo.toml version
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           grep -q "^version = \"$VERSION\"" Cargo.toml || {
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml version"; exit 1; }
+          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
       - name: Build static musl binary
         run: |
-          docker run --rm -v "$PWD":/app -w /app rust:1.90.0-alpine \
-            sh -c "apk add --no-cache musl-dev && cargo build --release --target x86_64-unknown-linux-musl"
+          docker run --rm -v "$PWD":/app -w /app \
+            rust:1.90.0-alpine@sha256:b4b54b176a74db7e5c68fdfe6029be39a02ccbcfe72b6e5a3e18e2c61b57ae26 \
+            sh -c "apk add --no-cache musl-dev && cargo build --release --locked --target x86_64-unknown-linux-musl"
       - name: Fix build output ownership
         run: sudo chown -R "$(id -u):$(id -g)" target/x86_64-unknown-linux-musl
       - name: Verify static linking
         run: |
-          file target/x86_64-unknown-linux-musl/release/redfish-exporter
-          ldd target/x86_64-unknown-linux-musl/release/redfish-exporter || true
+          binary=target/x86_64-unknown-linux-musl/release/redfish-exporter
+          file "$binary"
+          if readelf --program-headers "$binary" | grep -q 'Requesting program interpreter'; then
+            echo "release binary is dynamically linked" >&2
+            exit 1
+          fi
+      - name: Build release candidate container
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          tags: redfish-exporter:release-candidate
+      - name: Smoke release candidate container
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          test "$(docker run --rm redfish-exporter:release-candidate --version)" = \
+            "redfish-exporter $VERSION"
       - name: Package assets
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           cd target/x86_64-unknown-linux-musl/release
           cp "$GITHUB_WORKSPACE/LICENSE" .
-          tar czf redfish-exporter-${VERSION}-linux-amd64.tar.gz redfish-exporter LICENSE
+          cp "$GITHUB_WORKSPACE/README.md" "$GITHUB_WORKSPACE/CHANGELOG.md" \
+            "$GITHUB_WORKSPACE/config.example.yaml" .
+          tar czf redfish-exporter-${VERSION}-linux-amd64.tar.gz \
+            redfish-exporter LICENSE README.md CHANGELOG.md config.example.yaml
           sha256sum redfish-exporter-${VERSION}-linux-amd64.tar.gz > SHA256SUMS
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Generate locked-dependency SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        env:
+          SYFT_SOURCE_NAME: redfish-exporter
+          SYFT_SOURCE_VERSION: ${{ env.RELEASE_VERSION }}
         with:
+          path: .
+          config: .syft.yaml
+          syft-version: v1.51.0
+          format: spdx-json
+          output-file: target/x86_64-unknown-linux-musl/release/redfish-exporter.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Add SBOM checksum
+        working-directory: target/x86_64-unknown-linux-musl/release
+        run: sha256sum redfish-exporter.spdx.json >> SHA256SUMS
+      - name: Attest release binary provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: target/x86_64-unknown-linux-musl/release/redfish-exporter
+      - name: Attest release binary SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: target/x86_64-unknown-linux-musl/release/redfish-exporter
+          sbom-path: target/x86_64-unknown-linux-musl/release/redfish-exporter.spdx.json
+      - name: Attest release archive
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: target/x86_64-unknown-linux-musl/release/redfish-exporter-*-linux-amd64.tar.gz
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract container metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          generate_release_notes: true
           files: |
             target/x86_64-unknown-linux-musl/release/redfish-exporter-*-linux-amd64.tar.gz
             target/x86_64-unknown-linux-musl/release/SHA256SUMS
+            target/x86_64-unknown-linux-musl/release/redfish-exporter.spdx.json
+      - name: Build and push container image
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+      - name: Attest container image
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

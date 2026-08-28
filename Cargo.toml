@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.90"
 license = "Apache-2.0"
 description = "Prometheus exporter for Redfish BMCs, built on nv-redfish"
+repository = "https://github.com/franckcl1989/redfish-exporter"
+readme = "README.md"
+keywords = ["redfish", "prometheus", "exporter", "bmc", "monitoring"]
+categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 nv-redfish = { version = "0.15", default-features = false, features = [
@@ -31,6 +35,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 anyhow = "1"
+bytes = "1"
 humantime = "2"
 url = "2"
 zeroize = "1"
@@ -44,3 +49,19 @@ rcgen = "0.13"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tower = "0.5"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "test-util"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
+
+# Light optimization for performance/resource/soak test harnesses. A true release
+# performance run is part of release qualification; PR gates prioritize timely
+# leak/size/behavior feedback and do not ship this profile.
+[profile.release-gates]
+inherits = "release"
+opt-level = 1
+codegen-units = 256
+lto = false
+strip = "none"
+incremental = true

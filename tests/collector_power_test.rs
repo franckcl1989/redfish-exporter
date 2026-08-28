@@ -75,6 +75,10 @@ async fn collects_legacy_thermal_readings() {
     let labels: HashMap<_, _> = r.labels.iter().map(|(k, v)| (*k, v.as_str())).collect();
     assert_eq!(labels.get("bmc"), Some(&"bmc1"));
     assert_eq!(labels.get("chassis"), Some(&"1"));
+    assert_eq!(
+        labels.get("id"),
+        Some(&"/redfish/v1/Chassis/1/Thermal#/Temperatures/1")
+    );
     assert_eq!(labels.get("name"), Some(&"CPU1"));
     assert_eq!(labels.get("units"), Some(&"Cel"));
     assert_eq!(labels.get("sensor_type"), Some(&"Temperature"));
@@ -84,6 +88,40 @@ async fn collects_legacy_thermal_readings() {
         metrics
             .iter()
             .any(|m| m.name == "redfish_sensor_threshold_upper_critical" && m.value == 80.0)
+    );
+}
+
+#[tokio::test]
+async fn all_declared_legacy_temperature_fetches_failing_is_an_error() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_chassis_collection(&bmc);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/1",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis/1",
+            "Id": "1", "Name": "Chassis 1", "ChassisType": "RackMount",
+            "Thermal": { "@odata.id": "/redfish/v1/Chassis/1/Thermal" },
+        }),
+    ));
+    bmc.expect(Expect::get(
+        "/redfish/v1/Chassis/1/Thermal",
+        json!({
+            "@odata.id": "/redfish/v1/Chassis/1/Thermal",
+            "Id": "Thermal", "Name": "Thermal",
+            "Temperatures": [{
+                "@odata.id": "/redfish/v1/Chassis/1/Thermal/Temperatures/1"
+            }],
+        }),
+    ));
+    // No temperature resource response: the only declared member fails.
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let error = collect_power_metrics(bmc, &root, "bmc1")
+        .await
+        .expect_err("all declared temperatures must not fail silently");
+    assert!(
+        error.contains("all 1/1 temperature fetches failed"),
+        "{error}"
     );
 }
 

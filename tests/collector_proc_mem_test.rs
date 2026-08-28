@@ -178,7 +178,10 @@ async fn collects_processor_metrics() {
     assert_eq!(health.len(), 1);
     let labels = labels_of(health[0]);
     assert_eq!(labels.get("resource_type"), Some(&"processor"));
-    assert_eq!(labels.get("id"), Some(&"CPU1"));
+    assert_eq!(
+        labels.get("id"),
+        Some(&"/redfish/v1/Systems/1/Processors/CPU1")
+    );
     assert_eq!(labels.get("health"), Some(&"OK"));
     assert_eq!(labels.get("state"), Some(&"Enabled"));
     assert_eq!(health[0].value, 1.0);
@@ -418,7 +421,10 @@ async fn collects_memory_metrics() {
     assert_eq!(health.len(), 1);
     let labels = labels_of(health[0]);
     assert_eq!(labels.get("resource_type"), Some(&"memory"));
-    assert_eq!(labels.get("id"), Some(&"DIMM1"));
+    assert_eq!(
+        labels.get("id"),
+        Some(&"/redfish/v1/Systems/1/Memory/DIMM1")
+    );
     assert_eq!(labels.get("health"), Some(&"OK"));
     assert_eq!(labels.get("state"), Some(&"Enabled"));
 
@@ -587,4 +593,33 @@ async fn missing_metrics_links_produce_info_only() {
         labels.get("key") == Some(&"part_number")
             && labels.get("value") == Some(&"M393A2K43DB3-CWE")
     }));
+}
+
+#[tokio::test]
+async fn all_declared_processor_and_memory_collections_failing_are_errors() {
+    let processor_bmc = Arc::new(Mock::default());
+    expect_service_root(&processor_bmc);
+    expect_systems_collection(&processor_bmc);
+    expect_system(&processor_bmc, true, false);
+    let root = ServiceRoot::new(Arc::clone(&processor_bmc)).await.unwrap();
+    let error = collect_processors(processor_bmc, &root, "bmc1")
+        .await
+        .expect_err("declared processor collection must not fail silently");
+    assert!(
+        error.contains("all 1/1 declared collections failed"),
+        "{error}"
+    );
+
+    let memory_bmc = Arc::new(Mock::default());
+    expect_service_root(&memory_bmc);
+    expect_systems_collection(&memory_bmc);
+    expect_system(&memory_bmc, false, true);
+    let root = ServiceRoot::new(Arc::clone(&memory_bmc)).await.unwrap();
+    let error = collect_memory(memory_bmc, &root, "bmc1")
+        .await
+        .expect_err("declared memory collection must not fail silently");
+    assert!(
+        error.contains("all 1/1 declared collections failed"),
+        "{error}"
+    );
 }

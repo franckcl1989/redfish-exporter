@@ -249,7 +249,8 @@ async fn collects_drive_metrics() {
         .iter()
         .filter(|m| {
             let labels = labels_of(m);
-            labels.get("resource_type") == Some(&"drive") && labels.get("id") == Some(&"HDD1")
+            labels.get("resource_type") == Some(&"drive")
+                && labels.get("id") == Some(&"/redfish/v1/Systems/1/Storage/SATA1/Drives/HDD1")
         })
         .collect();
     assert_eq!(drive_health.len(), 1);
@@ -260,7 +261,8 @@ async fn collects_drive_metrics() {
         .iter()
         .filter(|m| {
             let labels = labels_of(m);
-            labels.get("resource_type") == Some(&"volume") && labels.get("id") == Some(&"1")
+            labels.get("resource_type") == Some(&"volume")
+                && labels.get("id") == Some(&"/redfish/v1/Systems/1/Storage/SATA1/Volumes/1")
         })
         .collect();
     assert_eq!(volume_health.len(), 1);
@@ -480,4 +482,49 @@ async fn drives_failure_does_not_block_volumes() {
             .any(|m| m.name == "redfish_drive_capacity_bytes"),
         "drive metrics must be skipped when drives() fails"
     );
+}
+
+#[tokio::test]
+async fn all_declared_storage_collections_failing_is_an_error() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, true);
+    // No Storage collection response: the only declared subtree fails.
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let error = collect_storage(bmc, &root, "bmc1")
+        .await
+        .expect_err("declared storage collection must not fail silently");
+    assert!(
+        error.contains("all 1/1 declared collections failed"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn all_declared_storage_controller_subresources_failing_is_an_error() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, true);
+    expect_storage_collection(&bmc);
+    bmc.expect(Expect::get(
+        "/redfish/v1/Systems/1/Storage/SATA1",
+        json!({
+            "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1",
+            "Id": "SATA1", "Name": "SATA 1",
+            "Drives": [{
+                "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1/Drives/HDD1"
+            }],
+            "Volumes": {
+                "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1/Volumes"
+            },
+        }),
+    ));
+    // Neither the drive nor volume collection has a response.
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let error = collect_storage(bmc, &root, "bmc1")
+        .await
+        .expect_err("all declared storage subresources must not fail silently");
+    assert!(error.contains("all 1/1 controllers failed"), "{error}");
 }

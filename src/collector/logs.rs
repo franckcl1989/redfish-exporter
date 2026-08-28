@@ -16,6 +16,12 @@ pub async fn collect_event_logs<B: Bmc>(
     bmc_name: &str,
 ) -> Result<Vec<Metric>, String> {
     let mut out = Vec::new();
+    let mut manager_attempts = 0usize;
+    let mut manager_failures = 0usize;
+    let mut attempted_services = 0usize;
+    let mut failed_services = 0usize;
+    let mut attempted_entries = 0usize;
+    let mut failed_entries = 0usize;
     let Some(managers) = root
         .managers()
         .await
@@ -29,8 +35,23 @@ pub async fn collect_event_logs<B: Bmc>(
         .map_err(|e| format!("manager members: {e}"))?;
     for manager in managers {
         let manager_id = manager.id().to_string();
-        let Ok(Some(services)) = manager.log_services().await else {
-            continue;
+        let services = match manager.log_services().await {
+            Ok(Some(services)) => {
+                manager_attempts += 1;
+                services
+            }
+            Ok(None) => continue,
+            Err(error) => {
+                manager_attempts += 1;
+                manager_failures += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    manager = %manager_id,
+                    error = %error,
+                    "log service collection fetch failed"
+                );
+                continue;
+            }
         };
         for service in services {
             let service_id = service.id().to_string();
@@ -38,9 +59,11 @@ pub async fn collect_event_logs<B: Bmc>(
             let Some(entries_ref) = &raw.entries else {
                 continue;
             };
+            attempted_services += 1;
             let entries = match fetch_all_pages(&bmc, entries_ref.id()).await {
                 Ok(entries) => entries,
                 Err(e) => {
+                    failed_services += 1;
                     tracing::warn!(
                         bmc = %bmc_name,
                         manager = %manager_id,
@@ -52,14 +75,41 @@ pub async fn collect_event_logs<B: Bmc>(
                 }
             };
             for value in entries {
-                let Ok(entry) =
-                    serde_json::from_value::<nv_redfish::schema::log_entry::LogEntry>(value)
-                else {
-                    continue;
+                attempted_entries += 1;
+                let entry = match serde_json::from_value::<nv_redfish::schema::log_entry::LogEntry>(
+                    value,
+                ) {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        failed_entries += 1;
+                        tracing::warn!(
+                            bmc = %bmc_name,
+                            manager = %manager_id,
+                            service = %service_id,
+                            error = %error,
+                            "event log entry parse failed"
+                        );
+                        continue;
+                    }
                 };
                 push_entry(&mut out, bmc_name, &manager_id, &service_id, &entry);
             }
         }
+    }
+    if manager_attempts > 0 && manager_failures == manager_attempts {
+        return Err(format!(
+            "event logs: all {manager_failures}/{manager_attempts} manager log-service collections failed"
+        ));
+    }
+    if attempted_services > 0 && failed_services == attempted_services {
+        return Err(format!(
+            "event log pagination: all {failed_services}/{attempted_services} log services failed"
+        ));
+    }
+    if attempted_entries > 0 && failed_entries == attempted_entries {
+        return Err(format!(
+            "event logs: all {failed_entries}/{attempted_entries} entries failed to parse"
+        ));
     }
     Ok(out)
 }

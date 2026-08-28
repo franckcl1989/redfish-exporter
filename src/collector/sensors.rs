@@ -2,6 +2,7 @@ use crate::collector::status_labels;
 use crate::metrics::{Metric, SENSOR_READING, unbox_reading};
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
+use nv_redfish::core::EntityTypeRef as _;
 use nv_redfish::schema::sensor::Sensor;
 use std::sync::Arc;
 
@@ -46,8 +47,14 @@ pub async fn collect_chassis_sensors<B: Bmc>(
         for link in links {
             let sensor = match link.fetch().await {
                 Ok(sensor) => sensor,
-                Err(_) => {
+                Err(error) => {
                     failed += 1;
+                    tracing::warn!(
+                        bmc = %bmc_name,
+                        chassis = %chassis_id,
+                        error = %error,
+                        "sensor fetch failed"
+                    );
                     continue;
                 }
             };
@@ -59,6 +66,7 @@ pub async fn collect_chassis_sensors<B: Bmc>(
                 Metric::gauge(SENSOR_READING.0, SENSOR_READING.1)
                     .label("bmc", bmc_name.to_string())
                     .label("chassis", chassis_id.clone())
+                    .label("id", labels.id.clone())
                     .label("name", labels.name.clone())
                     .label("units", labels.units.clone())
                     .label("sensor_type", labels.sensor_type.clone())
@@ -113,6 +121,7 @@ pub async fn collect_chassis_sensors<B: Bmc>(
 }
 
 struct SensorLabels {
+    id: String,
     name: String,
     units: String,
     sensor_type: String,
@@ -123,6 +132,7 @@ struct SensorLabels {
 fn collect_labels(sensor: &Sensor) -> SensorLabels {
     let (health, state) = status_labels(sensor.status.as_ref());
     SensorLabels {
+        id: sensor.base.odata_id().to_string(),
         name: sensor.base.id.to_string(),
         units: sensor.reading_units.clone().flatten().unwrap_or_default(),
         sensor_type: sensor
@@ -152,6 +162,7 @@ fn push_threshold(
         Metric::gauge(name_help.0, name_help.1)
             .label("bmc", bmc_name.to_string())
             .label("chassis", chassis_id.to_string())
+            .label("id", labels.id.clone())
             .label("name", labels.name.clone())
             .label("units", labels.units.clone())
             .label("sensor_type", labels.sensor_type.clone())

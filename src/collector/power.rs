@@ -7,6 +7,7 @@ use crate::metrics::{
 use nv_redfish::Bmc;
 use nv_redfish::Resource as _;
 use nv_redfish::chassis::Chassis;
+use nv_redfish::core::EntityTypeRef as _;
 use nv_redfish::schema::sensor::Sensor;
 use nv_redfish::schema::thermal::Temperature;
 use std::sync::Arc;
@@ -66,9 +67,21 @@ async fn collect_legacy_thermal<B: Bmc>(
     let Some(temperatures) = &thermal.raw().temperatures else {
         return Ok(());
     };
+    let total = temperatures.len();
+    let mut failed = 0usize;
     for nav in temperatures {
-        let Ok(temperature) = nav.get(bmc).await else {
-            continue;
+        let temperature = match nav.get(bmc).await {
+            Ok(temperature) => temperature,
+            Err(error) => {
+                failed += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    chassis = %chassis_id,
+                    error = %error,
+                    "legacy temperature fetch failed"
+                );
+                continue;
+            }
         };
         let Some(reading) = unbox_reading(temperature.reading_celsius) else {
             continue;
@@ -108,6 +121,11 @@ async fn collect_legacy_thermal<B: Bmc>(
             unbox_reading(temperature.lower_threshold_critical),
         );
     }
+    if total > 0 && failed == total {
+        return Err(format!(
+            "thermal: all {failed}/{total} temperature fetches failed"
+        ));
+    }
     Ok(())
 }
 
@@ -128,8 +146,25 @@ async fn collect_legacy_power<B: Bmc>(
     let Some(first) = controls.first() else {
         return legacy_power_supplies(bmc, bmc_name, chassis_id, &power, out).await;
     };
-    let Ok(power_control) = first.get(bmc).await else {
-        return legacy_power_supplies(bmc, bmc_name, chassis_id, &power, out).await;
+    let power_control = match first.get(bmc).await {
+        Ok(power_control) => power_control,
+        Err(error) => {
+            tracing::warn!(
+                bmc = %bmc_name,
+                chassis = %chassis_id,
+                error = %error,
+                "legacy power control fetch failed; trying legacy power supplies"
+            );
+            let has_supplies = power
+                .power_supplies
+                .as_ref()
+                .is_some_and(|supplies| !supplies.is_empty());
+            legacy_power_supplies(bmc, bmc_name, chassis_id, &power, out).await?;
+            if !has_supplies {
+                return Err(format!("power control: {error}"));
+            }
+            return Ok(());
+        }
     };
     let Some(consumed) = unbox_reading(power_control.power_consumed_watts) else {
         return legacy_power_supplies(bmc, bmc_name, chassis_id, &power, out).await;
@@ -183,9 +218,21 @@ async fn legacy_power_supplies<B: Bmc>(
     let Some(supplies) = &power.power_supplies else {
         return Ok(());
     };
+    let total = supplies.len();
+    let mut failed = 0usize;
     for nav in supplies {
-        let Ok(supply) = nav.get(bmc).await else {
-            continue;
+        let supply = match nav.get(bmc).await {
+            Ok(supply) => supply,
+            Err(error) => {
+                failed += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    chassis = %chassis_id,
+                    error = %error,
+                    "legacy power supply fetch failed"
+                );
+                continue;
+            }
         };
         let id = supply.base.member_id.clone();
         push_psu_metric(
@@ -225,6 +272,7 @@ async fn legacy_power_supplies<B: Bmc>(
         };
         let (health, state) = status_labels(supply.status.as_ref());
         let labels = ReadingLabels {
+            id: supply.base.odata_id().to_string(),
             name: supply
                 .name
                 .clone()
@@ -236,6 +284,11 @@ async fn legacy_power_supplies<B: Bmc>(
             state,
         };
         push_sensor_reading(out, bmc_name, chassis_id, &labels, reading);
+    }
+    if total > 0 && failed == total {
+        return Err(format!(
+            "power supplies: all {failed}/{total} legacy supply fetches failed"
+        ));
     }
     Ok(())
 }
@@ -250,20 +303,62 @@ async fn collect_power_supplies<B: Bmc>(
         .power_supplies()
         .await
         .map_err(|e| format!("power supplies: {e}"))?;
+    let mut attempted = 0usize;
+    let mut supply_failures = 0usize;
     for supply in supplies {
-        let supply_name = supply.id().to_string();
-        let Some(_) = supply.metrics().await.ok().flatten() else {
+        if supply.raw().metrics.is_none() {
             continue;
         };
-        let Ok(links) = supply.metrics_sensor_links().await else {
-            continue;
-        };
-        for link in links {
-            let Ok(sensor) = link.fetch().await else {
+        attempted += 1;
+        let links = match supply.metrics_sensor_links().await {
+            Ok(links) => links,
+            Err(error) => {
+                supply_failures += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    chassis = %chassis_id,
+                    supply = %supply.id(),
+                    error = %error,
+                    "power supply metrics fetch failed"
+                );
                 continue;
+            }
+        };
+        let total = links.len();
+        let mut failed = 0usize;
+        for link in links {
+            let sensor = match link.fetch().await {
+                Ok(sensor) => sensor,
+                Err(error) => {
+                    failed += 1;
+                    tracing::warn!(
+                        bmc = %bmc_name,
+                        chassis = %chassis_id,
+                        supply = %supply.id(),
+                        error = %error,
+                        "power supply metric sensor fetch failed"
+                    );
+                    continue;
+                }
             };
-            push_sensor_metric(out, bmc_name, chassis_id, &supply_name, &sensor);
+            push_sensor_metric(out, bmc_name, chassis_id, &sensor);
         }
+        if total > 0 && failed == total {
+            supply_failures += 1;
+            tracing::warn!(
+                bmc = %bmc_name,
+                chassis = %chassis_id,
+                supply = %supply.id(),
+                failed,
+                total,
+                "all power supply metric sensors failed"
+            );
+        }
+    }
+    if attempted > 0 && supply_failures == attempted {
+        return Err(format!(
+            "power supplies: all {supply_failures}/{attempted} declared metrics resources failed"
+        ));
     }
     Ok(())
 }
@@ -281,11 +376,29 @@ async fn collect_environment_metrics<B: Bmc>(
     else {
         return Ok(());
     };
-    for link in metrics.sensor_links() {
-        let Ok(sensor) = link.fetch().await else {
-            continue;
+    let links = metrics.sensor_links();
+    let total = links.len();
+    let mut failed = 0usize;
+    for link in links {
+        let sensor = match link.fetch().await {
+            Ok(sensor) => sensor,
+            Err(error) => {
+                failed += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    chassis = %chassis_id,
+                    error = %error,
+                    "environment metric sensor fetch failed"
+                );
+                continue;
+            }
         };
-        push_sensor_metric(out, bmc_name, chassis_id, "", &sensor);
+        push_sensor_metric(out, bmc_name, chassis_id, &sensor);
+    }
+    if total > 0 && failed == total {
+        return Err(format!(
+            "environment metrics: all {failed}/{total} sensor fetches failed"
+        ));
     }
     Ok(())
 }
@@ -310,6 +423,7 @@ async fn collect_controls<B: Bmc>(
         };
         let (health, state) = status_labels(control.status.as_ref());
         let labels = ReadingLabels {
+            id: control.base.odata_id().to_string(),
             name: control.base.id.to_string(),
             units: control
                 .set_point_units
@@ -326,6 +440,7 @@ async fn collect_controls<B: Bmc>(
 }
 
 struct ReadingLabels {
+    id: String,
     name: String,
     units: String,
     sensor_type: String,
@@ -336,6 +451,7 @@ struct ReadingLabels {
 fn temperature_labels(temperature: &Temperature) -> ReadingLabels {
     let (health, state) = status_labels(temperature.status.as_ref());
     ReadingLabels {
+        id: temperature.base.odata_id().to_string(),
         name: temperature
             .name
             .clone()
@@ -348,17 +464,8 @@ fn temperature_labels(temperature: &Temperature) -> ReadingLabels {
     }
 }
 
-fn push_sensor_metric(
-    out: &mut Vec<Metric>,
-    bmc_name: &str,
-    chassis_id: &str,
-    prefix: &str,
-    sensor: &Sensor,
-) {
-    let mut labels = sensor_labels(sensor);
-    if !prefix.is_empty() {
-        labels.name = format!("{prefix} {}", labels.name);
-    }
+fn push_sensor_metric(out: &mut Vec<Metric>, bmc_name: &str, chassis_id: &str, sensor: &Sensor) {
+    let labels = sensor_labels(sensor);
     let Some(reading) = unbox_reading(sensor.reading) else {
         return;
     };
@@ -368,6 +475,7 @@ fn push_sensor_metric(
 fn sensor_labels(sensor: &Sensor) -> ReadingLabels {
     let (health, state) = status_labels(sensor.status.as_ref());
     ReadingLabels {
+        id: sensor.base.odata_id().to_string(),
         name: sensor.base.id.to_string(),
         units: sensor.reading_units.clone().flatten().unwrap_or_default(),
         sensor_type: sensor
@@ -392,6 +500,7 @@ fn push_sensor_reading(
         Metric::gauge(SENSOR_READING.0, SENSOR_READING.1)
             .label("bmc", bmc_name.to_string())
             .label("chassis", chassis_id.to_string())
+            .label("id", labels.id.clone())
             .label("name", labels.name.clone())
             .label("units", labels.units.clone())
             .label("sensor_type", labels.sensor_type.clone())
@@ -416,6 +525,7 @@ fn push_threshold(
         Metric::gauge(name_help.0, name_help.1)
             .label("bmc", bmc_name.to_string())
             .label("chassis", chassis_id.to_string())
+            .label("id", labels.id.clone())
             .label("name", labels.name.clone())
             .label("units", labels.units.clone())
             .label("sensor_type", labels.sensor_type.clone())

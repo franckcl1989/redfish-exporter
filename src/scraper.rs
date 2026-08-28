@@ -6,10 +6,10 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::bmc::{BmcHandle, build_http_client, establish_session, is_unauthorized, make_bmc};
-use crate::collector::error::{ConcreteBmc, is_not_found};
+use crate::collector::error::ConcreteBmc;
 use crate::collector::{ScrapeReport, collect_fast, collect_slow, finalize_report, merge_reports};
 use crate::config::{AuthMethod, Config, StabilityConfig};
 use crate::metrics::{Metric, SCRAPE_ERROR, UP};
@@ -43,35 +43,14 @@ pub struct Scraper {
 }
 
 impl Scraper {
-    /// 为每个 BMC 建立 HTTP client 与 handle；Session 认证时先建会话。
-    pub async fn new(cfg: &Config, snapshot: Arc<Snapshot>) -> Result<Self, anyhow::Error> {
+    /// 为每个 BMC 建立 HTTP client 与 handle。网络 I/O 延迟到并发采集轮，
+    /// 避免单个慢 BMC 串行阻塞 HTTP 服务启动。
+    pub fn new(cfg: &Config, snapshot: Arc<Snapshot>) -> Result<Self, anyhow::Error> {
         let sessions: SessionStore = Arc::new(Mutex::new(HashMap::new()));
         let mut bmcs = Vec::with_capacity(cfg.bmcs.len());
         for bmc_cfg in &cfg.bmcs {
             let client = build_http_client(bmc_cfg, cfg.request_timeout)?;
             let handle = make_bmc(bmc_cfg, client);
-            if bmc_cfg.auth == AuthMethod::Session {
-                match establish_session(&handle.bmc, &bmc_cfg.username, bmc_cfg.password.expose())
-                    .await
-                {
-                    Ok(est) => {
-                        handle
-                            .bmc
-                            .set_credentials(nv_redfish::bmc_http::BmcCredentials::token(
-                                est.token,
-                            ));
-                        handle.session_established.store(true, Ordering::SeqCst);
-                        recover_lock(sessions.lock()).insert(bmc_cfg.name.clone(), est.session);
-                    }
-                    Err(e) => {
-                        warn!(
-                            bmc = %bmc_cfg.name,
-                            error = %e,
-                            "session establishment failed, falling back to basic auth"
-                        );
-                    }
-                }
-            }
             bmcs.push(handle);
         }
         Ok(Scraper {
@@ -87,32 +66,44 @@ impl Scraper {
         })
     }
 
-    /// 周期采集循环：每 tick 一轮，stop 信号在 tick 前触发则直接退出。
+    /// 周期采集循环。stop 可中断正在进行的整轮采集，随后清理已建立会话。
     pub fn run(mut self, mut stop: tokio::sync::watch::Receiver<bool>) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(self.interval);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
-                    _ = stop.changed() => {
-                        // graceful shutdown：删除已建立会话，避免 BMC 侧会话泄漏。
-                        // 先取出全部会话再 await，避免持锁跨 await。
-                        let to_delete = recover_lock(self.sessions.lock())
-                            .iter()
-                            .filter_map(|(n, s)| s.as_ref().map(|s| (n.clone(), Arc::clone(s))))
-                            .collect::<Vec<_>>();
-                        for (name, s) in to_delete {
-                            if let Err(e) = s.delete().await {
-                                warn!(bmc = %name, error = %e, "session cleanup failed");
-                            }
-                        }
-                        break;
-                    }
+                    biased;
+                    _ = wait_for_stop(&mut stop) => break,
                     _ = interval.tick() => {}
                 }
-                self.scrape_once().await;
+                tokio::select! {
+                    biased;
+                    _ = wait_for_stop(&mut stop) => break,
+                    _ = self.scrape_once() => {}
+                }
             }
+            self.cleanup_sessions().await;
         })
+    }
+
+    async fn cleanup_sessions(&self) {
+        let to_delete = recover_lock(self.sessions.lock())
+            .drain()
+            .filter_map(|(name, session)| session.map(|session| (name, session)))
+            .collect::<Vec<_>>();
+        let mut set = tokio::task::JoinSet::new();
+        for (name, session) in to_delete {
+            set.spawn(async move { (name, session.delete().await) });
+        }
+        while let Some(result) = set.join_next().await {
+            match result {
+                Ok((name, Err(e))) => warn!(bmc = %name, error = %e, "session cleanup failed"),
+                Ok((_, Ok(_))) => {}
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(e) => warn!(error = %e, "session cleanup task cancelled"),
+            }
+        }
     }
 
     async fn scrape_once(&mut self) {
@@ -248,9 +239,8 @@ impl Scraper {
                         }
                     }
                 }
-                Err(e) => {
-                    warn!(error = %e, "scrape task panicked");
-                }
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(e) => warn!(error = %e, "scrape task cancelled"),
             }
         }
         info!(
@@ -258,6 +248,14 @@ impl Scraper {
             duration_ms = started.elapsed().as_millis(),
             "scrape round complete"
         );
+    }
+}
+
+async fn wait_for_stop(stop: &mut tokio::sync::watch::Receiver<bool>) {
+    while !*stop.borrow() {
+        if stop.changed().await.is_err() {
+            break;
+        }
     }
 }
 
@@ -347,10 +345,8 @@ pub async fn run_bmc_round(
     // session 坏死的 BMC（如 Inspur 建立永不成功）的失败轮（401 重登失败路径）据此经
     // Healthy 失败分支路由进 SessionDegraded——此后 session 建立按退避节奏重试，而非每轮
     // 反复打 session 端点（spec §4.1）；SessionRetry 轮重挂失败的兜底成功轮据此留在
-    // SessionDegraded（不误升 Healthy）；basic 采集成功的轮走 ok 分支优先，保持 Healthy、
-    // up=1 可达、不进降级。
-    // 注：会话重建重试仅在降级态的失败轮按退避节奏推进（下一重试时刻随失败递增）；
-    // basic 采集成功的健康轮按 ok 分支优先保持 Healthy，不启动退避节奏（spec §4.1 冻结语义）。
+    // SessionDegraded（不误升 Healthy）。即使 basic 兜底采集成功，只要会话建立失败也进入
+    // 降级态，避免每轮敲击会话端点。
     let mut session_recovery_failed = false;
     if auth == AuthMethod::Session && attempt_session && !session_established.load(Ordering::SeqCst)
     {
@@ -446,7 +442,7 @@ pub async fn run_bmc_round(
 
 /// 单 BMC 单轮：快组必采（独立 deadline），慢组按 slow_interval 到期才采（独立 deadline，
 /// 结果缓存跨轮复用）。快/慢组各自截止，慢 BMC 的慢组超时不再拖死快组、也不会饿死慢组缓存。
-/// 返回 nv_redfish::Error 而非 String，供 401 重登/404 判定直接匹配状态码。
+/// 返回 nv_redfish::Error 而非 String，供 401 重登直接匹配状态码。
 async fn collect_round(
     bmc: Arc<ConcreteBmc>,
     name: &str,
@@ -454,23 +450,10 @@ async fn collect_round(
     slow_state: SlowState,
     timeout: Duration,
 ) -> Result<ScrapeReport, nv_redfish::Error<ConcreteBmc>> {
-    let root = match nv_redfish::ServiceRoot::new(Arc::clone(&bmc)).await {
-        Ok(r) => r,
-        Err(e) if is_not_found(&e) => {
-            debug!(bmc = %name, error = %e, "service root 404, skipping round");
-            // 不按失败轮处理（不计 scrape_errors）：以 up=0 快照保 /metrics 序列，
-            // 结构同下方失败轮的手工 report（finalize_report 空 failed 会给 up=1，不可用）。
-            return Ok(ScrapeReport {
-                metrics: vec![
-                    Metric::gauge(UP.0, UP.1)
-                        .label("bmc", name.to_string())
-                        .build(0.0),
-                ],
-                failed_resources: vec![],
-            });
-        }
-        Err(e) => return Err(e),
-    };
+    // A missing ServiceRoot is a failed BMC round, not a successful empty
+    // scrape. Propagating every root error ensures error accounting, alerts,
+    // and adaptive cooldown all see the same failure semantics.
+    let root = nv_redfish::ServiceRoot::new(Arc::clone(&bmc)).await?;
     let started = Instant::now();
     let fast = match with_deadline(timeout, collect_fast(Arc::clone(&bmc), &root, name)).await {
         Some(Ok(r)) => r,

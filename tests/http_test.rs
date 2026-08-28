@@ -4,9 +4,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use http_body_util::BodyExt;
 use redfish_exporter::collector::ScrapeReport;
-use redfish_exporter::config::{
-    AuthMethod, BmcConfig, Config, SecretString, WebConfig, load_config,
-};
+use redfish_exporter::config::{AuthMethod, BmcConfig, Config, SecretString, WebConfig};
 use redfish_exporter::http::router;
 use redfish_exporter::metrics::Metric;
 use redfish_exporter::registry::Snapshot;
@@ -16,27 +14,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
-use tokio::sync::RwLock;
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tower::ServiceExt;
 use url::Url;
-
-const CONFIG_A: &str = "\
-bmcs:
-  - name: bmc1
-    host: https://10.0.0.1
-    username: root
-    password: secret
-";
-
-const CONFIG_B: &str = "\
-bmcs:
-  - name: bmc1
-    host: https://10.0.0.2
-    username: root
-    password: secret
-";
 
 fn bmc(name: &str, host: &str) -> BmcConfig {
     BmcConfig {
@@ -68,19 +49,13 @@ fn test_config(hosts: &[(&str, &str)]) -> Config {
 }
 
 fn test_router(snapshot: Arc<Snapshot>, cfg: Config) -> Router {
-    router(
-        snapshot,
-        Arc::new(RwLock::new(cfg)),
-        PathBuf::from("config.yaml"),
-        None,
-    )
+    router(snapshot, cfg.bmcs.len(), None)
 }
 
 fn test_router_with_token(snapshot: Arc<Snapshot>, cfg: Config, token: &str) -> Router {
     router(
         snapshot,
-        Arc::new(RwLock::new(cfg)),
-        PathBuf::from("config.yaml"),
+        cfg.bmcs.len(),
         Some(SecretString::new(token.into())),
     )
 }
@@ -139,7 +114,7 @@ async fn snapshot_encoded_bytes_equal_live_encode() {
     snap.update("bmc1", reg.clone());
     let entries = snap.registries();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].1.encoded, live);
+    assert_eq!(snap.encoded().unwrap().as_ref(), live);
     assert!(Arc::ptr_eq(&entries[0].1.registry, &reg));
 }
 
@@ -221,6 +196,15 @@ async fn two_bmcs_both_served() {
     let body = body_text(resp).await;
     assert!(body.contains("redfish_up{bmc=\"bmc1\"} 1"), "{body}");
     assert!(body.contains("redfish_up{bmc=\"bmc2\"} 1"), "{body}");
+    assert_eq!(body.matches("# HELP redfish_up ").count(), 1, "{body}");
+    assert_eq!(body.matches("# TYPE redfish_up ").count(), 1, "{body}");
+    assert_eq!(
+        body.lines()
+            .filter(|line| line.starts_with("redfish_build_info{"))
+            .count(),
+        1,
+        "{body}"
+    );
 }
 
 #[tokio::test]
@@ -238,6 +222,51 @@ async fn healthz_returns_ok() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_text(resp).await;
     assert_eq!(body, "ok");
+}
+
+#[tokio::test]
+async fn readyz_waits_for_every_configured_bmc_snapshot() {
+    let snap = Arc::new(Snapshot::new());
+    let app = test_router(
+        Arc::clone(&snap),
+        test_config(&[("bmc1", "https://10.0.0.1"), ("bmc2", "https://10.0.0.2")]),
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    for name in ["bmc1", "bmc2"] {
+        let registry = redfish_exporter::registry::build_registry(
+            name,
+            &ScrapeReport {
+                metrics: vec![],
+                failed_resources: vec!["bmc".into()],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+        snap.update(name, registry);
+    }
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_text(response).await, "ready");
 }
 
 #[tokio::test]
@@ -259,6 +288,10 @@ async fn metrics_without_snapshot_returns_empty_with_header() {
             .map(|v| v.to_str().unwrap()),
         Some("no-data-yet")
     );
+    assert_eq!(
+        resp.headers()["content-type"],
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
 }
 
 #[tokio::test]
@@ -275,122 +308,6 @@ async fn info_endpoint_reports_build_info() {
     assert!(json.get("rust_version").is_some());
     assert!(json.get("os").is_some());
     assert!(json.get("arch").is_some());
-}
-
-#[tokio::test]
-async fn discover_endpoint_lists_targets() {
-    let snap = Arc::new(Snapshot::new());
-    let resp = test_router(
-        snap,
-        test_config(&[
-            ("bmc1", "https://10.0.0.1"),
-            ("bmc2", "https://10.0.0.2:8443"),
-        ]),
-    )
-    .oneshot(
-        Request::builder()
-            .uri("/discover")
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(resp.headers()["content-type"], "application/json");
-    let body = body_text(resp).await;
-    assert!(body.contains("https://10.0.0.1"), "{body}");
-    assert!(body.contains("https://10.0.0.2:8443"), "{body}");
-}
-
-#[tokio::test]
-async fn reload_endpoint_swaps_config() {
-    let dir = temp_config_dir();
-    let path = dir.join("config.yaml");
-    std::fs::write(&path, CONFIG_A).unwrap();
-    let cfg = Arc::new(RwLock::new(load_config(&path).unwrap()));
-    let snap = Arc::new(Snapshot::new());
-    let app = router(snap, cfg, path.clone(), None);
-
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/discover")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = body_text(resp).await;
-    assert!(body.contains("https://10.0.0.1"), "{body}");
-
-    std::fs::write(&path, CONFIG_B).unwrap();
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/reload")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_text(resp).await, "ok");
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/discover")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = body_text(resp).await;
-    assert!(body.contains("https://10.0.0.2"), "{body}");
-    assert!(!body.contains("https://10.0.0.1"), "{body}");
-    cleanup(&dir);
-}
-
-#[tokio::test]
-async fn reload_rejects_invalid_config() {
-    let dir = temp_config_dir();
-    let path = dir.join("config.yaml");
-    std::fs::write(&path, CONFIG_A).unwrap();
-    let cfg = Arc::new(RwLock::new(load_config(&path).unwrap()));
-    let snap = Arc::new(Snapshot::new());
-    let app = router(snap, cfg, path.clone(), None);
-
-    std::fs::write(&path, "bmcs: [broken").unwrap();
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/reload")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = body_text(resp).await;
-    assert!(body.contains("failed to parse config"), "{body}");
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/discover")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = body_text(resp).await;
-    assert!(body.contains("https://10.0.0.1"), "{body}");
-    cleanup(&dir);
 }
 
 const TEST_TOKEN: &str = "0123456789abcdef";
@@ -427,7 +344,7 @@ async fn auth_wrong_token_returns_401() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/healthz")
+                .uri("/info")
                 .header("authorization", "Bearer fedcba9876543210")
                 .body(Body::empty())
                 .unwrap(),
@@ -437,9 +354,9 @@ async fn auth_wrong_token_returns_401() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// RFC 6750：scheme 区分大小写，小写 `bearer` 必须被拒绝（401）。
+/// HTTP authentication scheme 不区分大小写，小写 `bearer` 必须被接受。
 #[tokio::test]
-async fn auth_lowercase_bearer_scheme_is_rejected() {
+async fn auth_lowercase_bearer_scheme_is_accepted() {
     let snap = Arc::new(Snapshot::new());
     let app = test_router_with_token(
         snap,
@@ -449,14 +366,14 @@ async fn auth_lowercase_bearer_scheme_is_rejected() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/healthz")
+                .uri("/info")
                 .header("authorization", format!("bearer {TEST_TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -467,7 +384,7 @@ async fn auth_correct_token_grants_all_get_endpoints() {
         test_config(&[("bmc1", "https://10.0.0.1")]),
         TEST_TOKEN,
     );
-    for path in ["/metrics", "/healthz", "/info", "/discover"] {
+    for path in ["/metrics", "/healthz", "/info"] {
         let resp = app
             .clone()
             .oneshot(
@@ -484,31 +401,23 @@ async fn auth_correct_token_grants_all_get_endpoints() {
 }
 
 #[tokio::test]
-async fn auth_correct_token_grants_reload() {
-    let dir = temp_config_dir();
-    let path = dir.join("config.yaml");
-    std::fs::write(&path, CONFIG_A).unwrap();
-    let cfg = Arc::new(RwLock::new(load_config(&path).unwrap()));
-    let snap = Arc::new(Snapshot::new());
-    let app = router(
-        snap,
-        cfg,
-        path.clone(),
-        Some(SecretString::new(TEST_TOKEN.into())),
+async fn auth_enabled_keeps_probe_endpoints_public() {
+    let app = test_router_with_token(
+        Arc::new(Snapshot::new()),
+        test_config(&[("bmc1", "https://10.0.0.1")]),
+        TEST_TOKEN,
     );
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/reload")
-                .header("authorization", format!("Bearer {TEST_TOKEN}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    cleanup(&dir);
+    for (path, status) in [
+        ("/healthz", StatusCode::OK),
+        ("/readyz", StatusCode::SERVICE_UNAVAILABLE),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "endpoint {path}");
+    }
 }
 
 #[tokio::test]

@@ -1,0 +1,4 @@
+check-for-app-update: false
+exclude:
+  - "./.git/**"
+  - "./target/**"

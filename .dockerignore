@@ -1,9 +1,9 @@
-target
 .git
-.superpowers
-.worktrees
-config.yaml
-docs
-tests
-deploy
 .github
+target
+docs
+deploy
+tests
+.syft.yaml
+*.md
+!README.md

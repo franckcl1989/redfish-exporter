@@ -1262,6 +1262,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-server",
+ "bytes",
  "clap",
  "http-body-util",
  "humantime",

@@ -2,7 +2,7 @@
 listen_addr: "0.0.0.0:9417"   # default is 127.0.0.1:9417; remote Prometheus needs an explicit bind
 scrape_interval: "30s"         # periodic scrape interval (default 30s)
 # slow_interval: "300s"        # optional: slow group (storage/network/firmware/assembly/event log/BIOS) interval (default: every round)
-scrape_timeout: "15s"          # per fast/slow-group deadline (default 15s)
+scrape_timeout: "15s"          # per fast/slow-group deadline (default 15s); measure and raise for slow BMCs
 request_timeout: "10s"         # per-request timeout (default 10s)
 stability:                    # failure cooldown / backoff (defaults shown)
   cooldown_failures: 3        # consecutive failed rounds before full cooldown
@@ -17,7 +17,7 @@ bmcs:
   - name: bmc1                 # unique, used as the `bmc` metric label
     host: https://10.0.0.1     # http:// or https://; credentials in the URL are rejected
     username: admin
-    password: "change-me"      # can be overridden by env var REDFISH_EXPORTER_PASSWORD_BMC1
+    password: "change-me"      # may be omitted when REDFISH_EXPORTER_PASSWORD_BMC1 is set
     auth: basic                # basic | session (session creates an X-Auth-Token)
     insecure_skip_verify: false  # WARNING: only for self-signed BMC certs, TLS verification disabled
     ca_cert_file: null         # optional PEM CA bundle for self-signed BMCs

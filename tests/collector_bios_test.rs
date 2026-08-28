@@ -174,9 +174,10 @@ async fn no_bios_link_is_ok() {
 }
 
 #[tokio::test]
-async fn list_attribute_value_fails_bios_parse_and_skips_system() {
+async fn list_attribute_value_fails_the_only_declared_bios_resource() {
     // dynamic_properties 仅支持 EdmPrimitiveType，属性值为数组时整个 BIOS 资源解析失败，
-    // system.bios() 返回 Err，采集器跳过该系统（不产生任何 BIOS 指标）。
+    // system.bios() 返回 Err；唯一已声明 BIOS 资源失败必须保持可观测，
+    // 不能静默返回空成功。
     let bmc = Arc::new(Mock::default());
     expect_service_root(&bmc);
     expect_systems_collection(&bmc);
@@ -184,6 +185,11 @@ async fn list_attribute_value_fails_bios_parse_and_skips_system() {
     expect_bios(&bmc, false, json!({ "ListAttr": ["a", "b"] }));
 
     let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
-    let metrics = collect_bios(bmc, &root, "bmc1").await.unwrap();
-    assert!(metrics.is_empty());
+    let error = collect_bios(bmc, &root, "bmc1")
+        .await
+        .expect_err("the only declared BIOS resource failed to parse");
+    assert!(
+        error.contains("all 1/1 declared resources failed"),
+        "{error}"
+    );
 }

@@ -21,17 +21,18 @@ pub async fn collect_systems<B: Bmc>(
         .map_err(|e| format!("systems members: {e}"))?;
     for system in systems {
         let system_id = system.id().to_string();
-        if matches!(system.power_state(), Some(PowerState::On)) {
+        let resource_id = system.odata_id().to_string();
+        if let Some(power_state) = system.power_state() {
             out.push(
                 Metric::gauge(POWER_STATE.0, POWER_STATE.1)
                     .label("bmc", bmc_name.to_string())
                     .label("system", system_id.clone())
-                    .build(1.0),
+                    .build(f64::from(matches!(power_state, PowerState::On))),
             );
         }
         let raw = system.raw();
         let (health, state) = status_labels(raw.status.as_ref());
-        push_health(&mut out, bmc_name, "system", &system_id, &health, &state);
+        push_health(&mut out, bmc_name, "system", &resource_id, &health, &state);
         // IndicatorLED：nv-redfish 0.15 编译 schema 为 Option<Option<IndicatorLed>> 枚举
         // （Unknown/Lit/Blinking/Off/UnsupportedValue），无 Display 实现，用 Debug 输出变体名。
         if let Some(led) = raw.indicator_led.flatten() {
@@ -45,16 +46,30 @@ pub async fn collect_systems<B: Bmc>(
             );
         }
         if let Some(value) = raw.manufacturer.clone().flatten() {
-            push_info(&mut out, bmc_name, "manufacturer", &value);
+            push_info(
+                &mut out,
+                bmc_name,
+                "system",
+                &resource_id,
+                "manufacturer",
+                &value,
+            );
         }
         if let Some(value) = raw.model.clone().flatten() {
-            push_info(&mut out, bmc_name, "model", &value);
+            push_info(&mut out, bmc_name, "system", &resource_id, "model", &value);
         }
         if let Some(value) = raw.serial_number.clone().flatten() {
-            push_info(&mut out, bmc_name, "serial_number", &value);
+            push_info(
+                &mut out,
+                bmc_name,
+                "system",
+                &resource_id,
+                "serial_number",
+                &value,
+            );
         }
         if let Some(value) = raw.sku.clone().flatten() {
-            push_info(&mut out, bmc_name, "sku", &value);
+            push_info(&mut out, bmc_name, "system", &resource_id, "sku", &value);
         }
     }
     Ok(out)
@@ -76,9 +91,10 @@ pub async fn collect_chassis_health<B: Bmc>(
         .map_err(|e| format!("chassis members: {e}"))?;
     for chassis in chassis_members {
         let chassis_id = chassis.id().to_string();
+        let resource_id = chassis.odata_id().to_string();
         let raw = chassis.raw();
         let (health, state) = status_labels(raw.status.as_ref());
-        push_health(&mut out, bmc_name, "chassis", &chassis_id, &health, &state);
+        push_health(&mut out, bmc_name, "chassis", &resource_id, &health, &state);
         // IndicatorLED：同 systems 遍历，无该字段的机箱（如 Dell 背板机箱）不产出。
         if let Some(led) = raw.indicator_led.flatten() {
             out.push(
@@ -91,16 +107,37 @@ pub async fn collect_chassis_health<B: Bmc>(
             );
         }
         if let Some(value) = raw.manufacturer.clone().flatten() {
-            push_info(&mut out, bmc_name, "manufacturer", &value);
+            push_info(
+                &mut out,
+                bmc_name,
+                "chassis",
+                &resource_id,
+                "manufacturer",
+                &value,
+            );
         }
         if let Some(value) = raw.model.clone().flatten() {
-            push_info(&mut out, bmc_name, "model", &value);
+            push_info(&mut out, bmc_name, "chassis", &resource_id, "model", &value);
         }
         if let Some(value) = raw.serial_number.clone().flatten() {
-            push_info(&mut out, bmc_name, "serial_number", &value);
+            push_info(
+                &mut out,
+                bmc_name,
+                "chassis",
+                &resource_id,
+                "serial_number",
+                &value,
+            );
         }
         if let Some(value) = raw.part_number.clone().flatten() {
-            push_info(&mut out, bmc_name, "part_number", &value);
+            push_info(
+                &mut out,
+                bmc_name,
+                "chassis",
+                &resource_id,
+                "part_number",
+                &value,
+            );
         }
     }
     Ok(out)
@@ -124,18 +161,32 @@ pub async fn collect_managers<B: Bmc>(
         .await
         .map_err(|e| format!("managers members: {e}"))?;
     for manager in managers {
-        let manager_id = manager.id().to_string();
+        let resource_id = manager.odata_id().to_string();
         let raw = manager.raw();
         let (health, state) = status_labels(raw.status.as_ref());
-        push_health(&mut out, bmc_name, "manager", &manager_id, &health, &state);
+        push_health(&mut out, bmc_name, "manager", &resource_id, &health, &state);
         if let Some(value) = raw.manufacturer.clone().flatten() {
-            push_info(&mut out, bmc_name, "manufacturer", &value);
+            push_info(
+                &mut out,
+                bmc_name,
+                "manager",
+                &resource_id,
+                "manufacturer",
+                &value,
+            );
         }
         if let Some(value) = raw.model.clone().flatten() {
-            push_info(&mut out, bmc_name, "model", &value);
+            push_info(&mut out, bmc_name, "manager", &resource_id, "model", &value);
         }
         if let Some(value) = raw.firmware_version.clone().flatten() {
-            push_info(&mut out, bmc_name, "firmware_version", &value);
+            push_info(
+                &mut out,
+                bmc_name,
+                "manager",
+                &resource_id,
+                "firmware_version",
+                &value,
+            );
         }
     }
     Ok(out)
@@ -155,20 +206,44 @@ pub async fn collect_assembly<B: Bmc>(
         .members()
         .await
         .map_err(|e| format!("chassis members: {e}"))?;
+    let mut attempted = 0usize;
+    let mut failed = 0usize;
     for chassis in chassis_members {
-        let Ok(Some(assembly)) = chassis.assembly().await else {
-            continue;
+        let chassis_id = chassis.id().to_string();
+        let assembly = match chassis.assembly().await {
+            Ok(Some(assembly)) => {
+                attempted += 1;
+                assembly
+            }
+            Ok(None) => continue,
+            Err(error) => {
+                attempted += 1;
+                failed += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    chassis = %chassis_id,
+                    error = %error,
+                    "assembly resource fetch failed"
+                );
+                continue;
+            }
         };
-        let Ok(assemblies) = assembly.assemblies().await else {
-            continue;
+        let assemblies = match assembly.assemblies().await {
+            Ok(assemblies) => assemblies,
+            Err(error) => {
+                failed += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    chassis = %chassis_id,
+                    error = %error,
+                    "assembly members fetch failed"
+                );
+                continue;
+            }
         };
         for assembly_data in assemblies {
             let raw = assembly_data.raw();
-            let assembly_id = raw
-                .odata_id()
-                .last_segment()
-                .unwrap_or_default()
-                .to_string();
+            let assembly_id = raw.odata_id().to_string();
             let (health, state) = status_labels(raw.status.as_ref());
             push_health(
                 &mut out,
@@ -179,18 +254,51 @@ pub async fn collect_assembly<B: Bmc>(
                 &state,
             );
             if let Some(value) = raw.producer.clone().flatten() {
-                push_info(&mut out, bmc_name, "producer", &value);
+                push_info(
+                    &mut out,
+                    bmc_name,
+                    "assembly",
+                    &assembly_id,
+                    "producer",
+                    &value,
+                );
             }
             if let Some(value) = raw.model.clone().flatten() {
-                push_info(&mut out, bmc_name, "model", &value);
+                push_info(
+                    &mut out,
+                    bmc_name,
+                    "assembly",
+                    &assembly_id,
+                    "model",
+                    &value,
+                );
             }
             if let Some(value) = raw.part_number.clone().flatten() {
-                push_info(&mut out, bmc_name, "part_number", &value);
+                push_info(
+                    &mut out,
+                    bmc_name,
+                    "assembly",
+                    &assembly_id,
+                    "part_number",
+                    &value,
+                );
             }
             if let Some(value) = raw.serial_number.clone().flatten() {
-                push_info(&mut out, bmc_name, "serial_number", &value);
+                push_info(
+                    &mut out,
+                    bmc_name,
+                    "assembly",
+                    &assembly_id,
+                    "serial_number",
+                    &value,
+                );
             }
         }
+    }
+    if attempted > 0 && failed == attempted {
+        return Err(format!(
+            "assembly: all {failed}/{attempted} declared resources failed"
+        ));
     }
     Ok(out)
 }
@@ -234,9 +342,16 @@ fn collect_inventory_items<B: Bmc>(
 ) {
     for item in items {
         let raw = item.raw();
-        let id = raw.base.id.clone();
+        let id = item.odata_id().to_string();
         if let Some(version) = item.version() {
-            push_info(out, bmc_name, version_key, &format!("{version}"));
+            push_info(
+                out,
+                bmc_name,
+                "software_inventory",
+                &id,
+                version_key,
+                &format!("{version}"),
+            );
         }
         let (health, state) = status_labels(raw.status.as_ref());
         push_health(out, bmc_name, "software_inventory", &id, &health, &state);

@@ -25,14 +25,36 @@ pub async fn collect_processors<B: Bmc>(
         .members()
         .await
         .map_err(|e| format!("systems members: {e}"))?;
+    let mut attempted = 0usize;
+    let mut failed = 0usize;
     for system in systems {
         let system_id = system.id().to_string();
-        let Ok(Some(processors)) = system.processors().await else {
-            continue;
+        let processors = match system.processors().await {
+            Ok(Some(processors)) => {
+                attempted += 1;
+                processors
+            }
+            Ok(None) => continue,
+            Err(error) => {
+                attempted += 1;
+                failed += 1;
+                tracing::warn!(
+                    bmc = %bmc_name,
+                    system = %system_id,
+                    error = %error,
+                    "processor collection fetch failed"
+                );
+                continue;
+            }
         };
         for processor in processors {
             collect_processor(bmc_name, &system_id, &processor, &mut out).await;
         }
+    }
+    if attempted > 0 && failed == attempted {
+        return Err(format!(
+            "processors: all {failed}/{attempted} declared collections failed"
+        ));
     }
     Ok(out)
 }
@@ -45,8 +67,9 @@ async fn collect_processor<B: Bmc>(
 ) {
     let raw = processor.raw();
     let id = processor.id().to_string();
+    let resource_id = processor.odata_id().to_string();
     let (health, state) = status_labels(raw.status.as_ref());
-    push_health(out, bmc_name, "processor", &id, &health, &state);
+    push_health(out, bmc_name, "processor", &resource_id, &health, &state);
     // 频率：MaxSpeedMHz 为标准字段；当前频率取厂商 OEM 字段
     // （Dell CurrentClockSpeedMhz / 浪潮 Public.FrequencyMHz），
     // 缺失时该指标不产出（真机探测：Dell 2100 / 浪潮 2100）。
@@ -81,16 +104,41 @@ async fn collect_processor<B: Bmc>(
         push_value(out, bmc_name, system_id, &id, PROCESSOR_VOLTAGE, volts);
     }
     if let Some(value) = raw.manufacturer.clone().flatten() {
-        push_info(out, bmc_name, "manufacturer", &value);
+        push_info(
+            out,
+            bmc_name,
+            "processor",
+            &resource_id,
+            "manufacturer",
+            &value,
+        );
     }
     if let Some(value) = raw.model.clone().flatten() {
-        push_info(out, bmc_name, "model", &value);
+        push_info(out, bmc_name, "processor", &resource_id, "model", &value);
     }
     if let Some(value) = raw.processor_type.flatten() {
-        push_info(out, bmc_name, "processor_type", &format!("{value:?}"));
+        push_info(
+            out,
+            bmc_name,
+            "processor",
+            &resource_id,
+            "processor_type",
+            &format!("{value:?}"),
+        );
     }
-    let Ok(Some(metrics)) = processor.metrics().await else {
-        return;
+    let metrics = match processor.metrics().await {
+        Ok(Some(metrics)) => metrics,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(
+                bmc = %bmc_name,
+                system = %system_id,
+                processor = %id,
+                error = %error,
+                "processor metrics fetch failed"
+            );
+            return;
+        }
     };
     let metrics = metrics.raw();
     push_value(
