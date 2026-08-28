@@ -73,13 +73,14 @@ jobs:
       - name: Package assets
         run: |
           VERSION=${GITHUB_REF_NAME#v}
+          archive="redfish-exporter-${VERSION}-linux-amd64.tar.gz"
           cd target/x86_64-unknown-linux-musl/release
           cp "$GITHUB_WORKSPACE/LICENSE" .
           cp "$GITHUB_WORKSPACE/README.md" "$GITHUB_WORKSPACE/CHANGELOG.md" \
             "$GITHUB_WORKSPACE/config.example.yaml" .
-          tar czf redfish-exporter-${VERSION}-linux-amd64.tar.gz \
+          tar czf "$archive" \
             redfish-exporter LICENSE README.md CHANGELOG.md config.example.yaml
-          sha256sum redfish-exporter-${VERSION}-linux-amd64.tar.gz > SHA256SUMS
+          sha256sum "$archive" > SHA256SUMS
       - name: Generate locked-dependency SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         env:

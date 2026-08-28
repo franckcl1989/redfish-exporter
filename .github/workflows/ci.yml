@@ -24,7 +24,7 @@ jobs:
       - name: Validate GitHub Actions and shipped observability assets
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo \
-            rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+            rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
           docker run --rm --entrypoint /bin/promtool -v "$PWD:/workspace:ro" \
             prom/prometheus:v3.13.2@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69 \
             check rules /workspace/deploy/prometheus/redfish-alerts.yml
