@@ -102,6 +102,18 @@ pub async fn fetch_all_pages<B: Bmc>(
     fetch_all_pages_with_limits(bmc, url, MAX_PAGES, MAX_PAGE_BYTES, MAX_TOTAL_MEMBERS).await
 }
 
+/// Fetch at most `max_total_members` members and stop pagination successfully
+/// once the cap is reached. This is used only by explicitly enabled
+/// high-cardinality collectors, where truncation is safer than either an
+/// unbounded snapshot or marking an otherwise healthy BMC down.
+pub async fn fetch_pages_up_to<B: Bmc>(
+    bmc: &Arc<B>,
+    url: &ODataId,
+    max_total_members: usize,
+) -> Result<Vec<Value>, PaginationError<B>> {
+    fetch_pages(bmc, url, MAX_PAGES, MAX_PAGE_BYTES, max_total_members, true).await
+}
+
 /// 带显式上限的分页抓取（测试接缝）：上限语义同 fetch_all_pages。
 pub async fn fetch_all_pages_with_limits<B: Bmc>(
     bmc: &Arc<B>,
@@ -109,6 +121,25 @@ pub async fn fetch_all_pages_with_limits<B: Bmc>(
     max_pages: usize,
     max_page_bytes: usize,
     max_total_members: usize,
+) -> Result<Vec<Value>, PaginationError<B>> {
+    fetch_pages(
+        bmc,
+        url,
+        max_pages,
+        max_page_bytes,
+        max_total_members,
+        false,
+    )
+    .await
+}
+
+async fn fetch_pages<B: Bmc>(
+    bmc: &Arc<B>,
+    url: &ODataId,
+    max_pages: usize,
+    max_page_bytes: usize,
+    max_total_members: usize,
+    truncate_at_member_limit: bool,
 ) -> Result<Vec<Value>, PaginationError<B>> {
     let mut out = Vec::new();
     let mut next = url.clone();
@@ -123,7 +154,22 @@ pub async fn fetch_all_pages_with_limits<B: Bmc>(
             tracing::warn!(url = %next, size, "pagination page exceeds size limit");
             return Err(PaginationError::PageTooLarge);
         }
-        out.extend(page.members.iter().cloned());
+        if truncate_at_member_limit {
+            let remaining = max_total_members.saturating_sub(out.len());
+            out.extend(page.members.iter().take(remaining).cloned());
+            if page.members.len() > remaining
+                || (out.len() == max_total_members && page.next_link.is_some())
+            {
+                tracing::warn!(
+                    url = %next,
+                    members = out.len(),
+                    "pagination member cap reached; remaining members omitted"
+                );
+                return Ok(out);
+            }
+        } else {
+            out.extend(page.members.iter().cloned());
+        }
         if out.len() > max_total_members {
             tracing::warn!(
                 url = %next,

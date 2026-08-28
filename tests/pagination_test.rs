@@ -206,3 +206,24 @@ async fn errors_when_total_members_exceeded() {
         Err(redfish_exporter::pagination::PaginationError::TooManyMembers(2))
     ));
 }
+
+#[tokio::test]
+async fn capped_fetch_truncates_without_requesting_another_page() {
+    let bmc = Arc::new(Mock::default());
+    let url: ODataId = ENTRIES.to_string().into();
+    bmc.expect(Expect::get(
+        ENTRIES,
+        json!({
+            "@odata.id": ENTRIES,
+            "Members": [{"Id": "3"}, {"Id": "2"}, {"Id": "1"}],
+            "Members@odata.nextLink": format!("{ENTRIES}?$skip=3")
+        }),
+    ));
+
+    let pages = redfish_exporter::pagination::fetch_pages_up_to(&bmc, &url, 2)
+        .await
+        .unwrap();
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[0]["Id"], "3");
+    assert_eq!(pages[1]["Id"], "2");
+}

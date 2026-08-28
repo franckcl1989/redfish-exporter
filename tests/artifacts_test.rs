@@ -31,22 +31,49 @@ fn shipped_configuration_and_observability_assets_parse() {
 
     let alerts = yaml_documents(include_str!("../deploy/prometheus/redfish-alerts.yml"));
     assert_eq!(alerts.len(), 1);
-    assert_eq!(
-        alerts[0]["groups"][0]["rules"]
-            .as_sequence()
-            .expect("Prometheus rule list")
-            .len(),
-        5
-    );
+    let rules = alerts[0]["groups"][0]["rules"]
+        .as_sequence()
+        .expect("Prometheus rule list");
+    assert_eq!(rules.len(), 12);
+    let alert_names = rules
+        .iter()
+        .filter_map(|rule| rule["alert"].as_str())
+        .collect::<std::collections::HashSet<_>>();
+    for required in [
+        "RedfishBMCUnreachable",
+        "RedfishResourceCritical",
+        "RedfishMemoryUncorrectableECC",
+        "RedfishDrivePredictiveFailure",
+        "RedfishBiosPendingChanges",
+    ] {
+        assert!(alert_names.contains(required), "missing alert: {required}");
+    }
 
     let dashboard: serde_json::Value =
         serde_json::from_str(include_str!("../deploy/grafana/redfish-dashboard.json"))
             .expect("Grafana dashboard must be valid JSON");
-    assert!(
-        dashboard["panels"]
-            .as_array()
-            .is_some_and(|panels| !panels.is_empty())
-    );
+    let panels = dashboard["panels"]
+        .as_array()
+        .expect("Grafana dashboard panels");
+    assert!(panels.len() >= 12);
+    let expressions = panels
+        .iter()
+        .flat_map(|panel| panel["targets"].as_array().into_iter().flatten())
+        .filter_map(|target| target["expr"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for required in [
+        "redfish_up",
+        "redfish_health_status",
+        "redfish_scrape_errors_total",
+        "redfish_memory_uncorrectable_errors",
+        "redfish_drive_life_left_percent",
+    ] {
+        assert!(
+            expressions.contains(required),
+            "dashboard does not use {required}"
+        );
+    }
 }
 
 #[test]

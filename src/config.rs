@@ -63,6 +63,42 @@ pub struct StabilityConfig {
     pub cooldown_max: Duration,
 }
 
+/// High-cardinality collectors are disabled by default. Operators may opt in,
+/// but the limits remain bounded so a malformed or very large BMC inventory
+/// cannot create an unbounded Prometheus snapshot.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CollectorsConfig {
+    pub event_logs: bool,
+    pub event_log_limit: usize,
+    pub bios_attributes: bool,
+    pub bios_attribute_limit: usize,
+}
+
+pub const MAX_EVENT_LOG_LIMIT: usize = 5_000;
+pub const MAX_BIOS_ATTRIBUTE_LIMIT: usize = 10_000;
+
+impl Default for CollectorsConfig {
+    fn default() -> Self {
+        Self {
+            event_logs: false,
+            event_log_limit: 500,
+            bios_attributes: false,
+            bios_attribute_limit: 10_000,
+        }
+    }
+}
+
+impl CollectorsConfig {
+    pub fn all_enabled() -> Self {
+        Self {
+            event_logs: true,
+            bios_attributes: true,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub listen_addr: SocketAddr,
@@ -73,6 +109,7 @@ pub struct Config {
     pub bmcs: Vec<BmcConfig>,
     pub web: WebConfig,
     pub stability: StabilityConfig,
+    pub collectors: CollectorsConfig,
 }
 
 #[derive(Debug, Error)]
@@ -180,6 +217,8 @@ struct RawConfig {
     web: RawWebConfig,
     #[serde(default)]
     stability: RawStabilityConfig,
+    #[serde(default)]
+    collectors: CollectorsConfig,
 }
 
 fn default_listen_addr() -> String {
@@ -410,6 +449,16 @@ pub fn load_config_with_env(
             "stability: cooldown_max must be >= cooldown_base".into(),
         ));
     }
+    if !(1..=MAX_EVENT_LOG_LIMIT).contains(&raw.collectors.event_log_limit) {
+        return Err(ConfigError::Invalid(format!(
+            "collectors.event_log_limit must be between 1 and {MAX_EVENT_LOG_LIMIT}"
+        )));
+    }
+    if !(1..=MAX_BIOS_ATTRIBUTE_LIMIT).contains(&raw.collectors.bios_attribute_limit) {
+        return Err(ConfigError::Invalid(format!(
+            "collectors.bios_attribute_limit must be between 1 and {MAX_BIOS_ATTRIBUTE_LIMIT}"
+        )));
+    }
     Ok(Config {
         listen_addr,
         scrape_interval: raw.scrape_interval,
@@ -423,6 +472,7 @@ pub fn load_config_with_env(
             cooldown_base: raw.stability.cooldown_base,
             cooldown_max: raw.stability.cooldown_max,
         },
+        collectors: raw.collectors,
     })
 }
 

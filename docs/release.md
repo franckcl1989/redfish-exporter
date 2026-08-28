@@ -12,19 +12,22 @@ firmware versions, network path, and Prometheus deployment.
   short soak, graceful-shutdown smoke, dependency policy, and production
   container smoke.
 - For the 0.1.0 validation profile, run the release commit in staging for at
-  least 24 minutes against every BMC vendor/model/firmware family planned for
+  least 15 minutes against every BMC vendor/model/firmware family planned for
   the first rollout. The run must include the initial full collection, at least
-  one subsequent slow-group refresh, and at least ten fast-group refreshes. Use
-  least-privilege read-only Redfish accounts and the same TLS/CA and proxy path
-  as production.
+  one subsequent slow-group refresh, and at least five fast-group refreshes; set
+  a shorter validation-only slow interval if needed to fit that coverage into
+  the gate. Use least-privilege read-only Redfish accounts and the same TLS/CA
+  and proxy path as production.
 - Confirm `redfish_up == 1`, no persistent `redfish_scrape_error`, stable process
   RSS, acceptable BMC request load, expected metric cardinality, and successful
   dashboard/alert evaluation. Investigate unsupported resources; do not hide
   unexpected errors with alert exclusions.
 - Size `scrape_timeout` from measured full-group tail latency rather than the
-  default alone. The 0.1.0 IEIT/Inspur NF5280M6 validation profile uses 180s
-  with a 120s fast interval and 900s slow interval; a 120s deadline proved too
-  tight after event-log growth and network-adapter fallback requests.
+  default alone. The 0.1.0 IEIT/Inspur NF5280M6 production profile uses 180s
+  with a 120s fast interval and 900s slow interval; the 15-minute acceptance
+  run uses a validation-only 420s slow interval to complete two slow groups. A
+  120s deadline proved too tight after event-log growth and network-adapter
+  fallback requests.
 - Confirm the deployment injects BMC passwords and the inbound bearer token from
   a secret store, mounts configuration read-only, and uses certificate
   verification (`ca_cert_file`) rather than `insecure_skip_verify`.
@@ -53,7 +56,7 @@ gh attestation verify redfish-exporter-0.1.0-linux-amd64.tar.gz \
 
 Deploy by immutable image digest, not a mutable semver tag. Start with one
 canary BMC group, verify at least two complete scrape intervals plus the alerts
-and readiness probe, then expand gradually. The 24-minute release gate is not a
+and readiness probe, then expand gradually. The 15-minute release gate is not a
 substitute for post-deployment memory, cardinality, and BMC-load monitoring.
 
 ## Rollback

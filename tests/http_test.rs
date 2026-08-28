@@ -45,6 +45,7 @@ fn test_config(hosts: &[(&str, &str)]) -> Config {
             cooldown_base: Duration::from_secs(60),
             cooldown_max: Duration::from_secs(300),
         },
+        collectors: redfish_exporter::config::CollectorsConfig::default(),
     }
 }
 

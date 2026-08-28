@@ -134,6 +134,52 @@ bmcs:
     );
     let cfg = load_config_with_env(&p, |_| None).unwrap();
     assert_eq!(cfg.slow_interval, None);
+    assert!(!cfg.collectors.event_logs);
+    assert_eq!(cfg.collectors.event_log_limit, 500);
+    assert!(!cfg.collectors.bios_attributes);
+    assert_eq!(cfg.collectors.bios_attribute_limit, 10_000);
+}
+
+#[test]
+fn parses_high_cardinality_collector_opt_ins() {
+    let p = write_tmp(
+        "collectors",
+        r#"
+collectors:
+  event_logs: true
+  event_log_limit: 750
+  bios_attributes: true
+  bios_attribute_limit: 8000
+bmcs:
+  - { name: a, host: https://h1, username: u, password: "p" }
+"#,
+    );
+    let cfg = load_config_with_env(&p, |_| None).unwrap();
+    assert!(cfg.collectors.event_logs);
+    assert_eq!(cfg.collectors.event_log_limit, 750);
+    assert!(cfg.collectors.bios_attributes);
+    assert_eq!(cfg.collectors.bios_attribute_limit, 8_000);
+}
+
+#[test]
+fn rejects_unbounded_high_cardinality_collector_limits() {
+    for (name, field, value) in [
+        ("event_zero", "event_log_limit", 0),
+        ("event_large", "event_log_limit", 5_001),
+        ("bios_zero", "bios_attribute_limit", 0),
+        ("bios_large", "bios_attribute_limit", 10_001),
+    ] {
+        let p = write_tmp(
+            name,
+            &format!(
+                "collectors:\n  {field}: {value}\nbmcs:\n  - {{ name: a, host: https://h1, username: u, password: \"p\" }}\n"
+            ),
+        );
+        assert!(matches!(
+            load_config_with_env(&p, |_| None),
+            Err(ConfigError::Invalid(_))
+        ));
+    }
 }
 
 #[test]

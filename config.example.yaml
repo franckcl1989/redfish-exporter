@@ -8,6 +8,11 @@ stability:                    # failure cooldown / backoff (defaults shown)
   cooldown_failures: 3        # consecutive failed rounds before full cooldown
   cooldown_base: "60s"        # first backoff after cooldown starts
   cooldown_max: "300s"        # backoff cap
+collectors:                   # high-cardinality collectors are explicit opt-ins
+  event_logs: false           # exports one series per BMC log entry when enabled
+  event_log_limit: 500        # per-BMC snapshot cap; valid range 1..5000
+  bios_attributes: false      # BIOS pending state remains enabled; full attributes are opt-in
+  bios_attribute_limit: 10000 # per-BMC snapshot cap; valid range 1..10000
 web:                           # optional inbound hardening (see docs/security.md)
   # auth_token: "change-me-at-least-16-chars"   # or auth_token_file: /path/to/token (mutually exclusive)
   # auth_token_file: null

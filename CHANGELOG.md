@@ -16,6 +16,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   best-effort server-side session cleanup during graceful shutdown.
 - Optional inbound bearer authentication and TLS, custom BMC CA bundles,
   health/readiness probes, Kubernetes manifests, alerts, and a Grafana dashboard.
+- A production operations dashboard and alert pack covering availability,
+  collector failures, component health, ECC, drive life/failure, BIOS pending
+  changes, temperatures, power, CPU frequency, and network state.
 - Release checksums, a locked-dependency SPDX SBOM, provenance/SBOM
   attestations, and a static non-root distroless container image.
 
@@ -25,6 +28,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   zeroization, same-origin redirect enforcement, request/scrape deadlines, and
   response/pagination limits.
 - SHA-pinned GitHub Actions and digest-pinned build/runtime container bases.
+- High-cardinality per-entry event logs and full BIOS attributes are explicit
+  opt-ins with validated per-BMC snapshot caps; core hardware telemetry and BIOS
+  pending state remain enabled by default.
 - Cargo audit and cargo-deny policy gates with documented build-only advisory
   exceptions.
 

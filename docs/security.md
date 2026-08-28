@@ -26,6 +26,8 @@
 | 密码残留内存 | SecretString Drop 时 zeroize；已知局限：nv-redfish 内部凭据副本不受控（如实说明） |
 | 密码落盘 | 环境变量覆盖 `REDFISH_EXPORTER_PASSWORD_<NAME>`（name 大写、非字母数字替换 `_`；空值/映射冲突报错） |
 | 响应耗尽内存 | 分页单页 64MiB / 页数 1000 / 累计成员 200,000；已知局限：上限为反序列化后校验（nv 类型化 fetch 无流式读取），流式上限记 backlog |
+| Prometheus 高基数耗尽 | 逐条事件日志与 BIOS 全属性默认关闭；显式开启时每 BMC 分别默认限制 500/10,000 条，配置硬上限为 5,000/10,000 |
+| 资产/日志内容泄露 | `redfish_info` 可含序列号/MAC，opt-in BIOS 与事件日志还可含配置值和消息；远程 `/metrics` 必须使用网络隔离及 `web.auth_token`/TLS，Prometheus 侧限制访问权限与保留周期 |
 | TLS 校验绕过 | per-BMC `insecure_skip_verify` opt-in，与 `ca_cert_file` 互斥；CA 文件支持多证书 PEM bundle |
 | 代理截获 | 环境变量透传（reqwest 默认）；BMC 网段应入 NO_PROXY 或依赖 TLS |
 

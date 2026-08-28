@@ -5,7 +5,7 @@ A Prometheus exporter for Redfish BMCs, built on [nv-redfish](https://github.com
 - **Multi-BMC**: scrape any number of BMCs from a single process.
 - **Periodic scrape + snapshot cache**: every BMC is scraped on a fixed interval; the latest completed snapshot (including explicit failure state) is cached and served atomically from `GET /metrics` (pre-encoded, zero live encoding on the hot path).
 - **Resource-level isolation**: a failing resource (e.g. a missing chassis collection) marks that BMC's scrape as failed without dropping the rest of the collected data.
-- **Fast/slow scheduling**: heavy collectors (storage, network, firmware, assembly, event logs, BIOS) run at most once per `slow_interval` with last-good caching; light collectors run every round.
+- **Fast/slow scheduling**: heavy collectors (storage, network, firmware, assembly, BIOS pending state, and opt-in event logs/full BIOS attributes) run at most once per `slow_interval` with last-good caching; light collectors run every round.
 - **Session management**: `basic` or `session` auth per BMC, automatic 401 re-login, basic-auth fallback, exponential-backoff cooldown for failing BMCs, server-side session cleanup on shutdown.
 - **Defensive scraping**: event-log pagination with loop/size defenses, per-request timeouts, and per fast/slow-group scrape deadlines (`fast:timeout` / `slow:timeout` on deadline expiry).
 
@@ -60,6 +60,10 @@ See [`config.example.yaml`](config.example.yaml). All durations use `humantime` 
 | `slow_interval`          | `null`        | Interval for slow-group collectors (storage, network, firmware, assembly, event logs, BIOS); `null` = collect every round |
 | `request_timeout`        | `10s`         | Per-request HTTP timeout, applied to every BMC request       |
 | `stability`                | defaults 3 / 60s / 300s | Failure cooldown: consecutive failed rounds before full cooldown, first backoff, backoff cap. Session-auth BMCs fall back to basic collection while session re-login backs off |
+| `collectors.event_logs`    | `false`       | Opt in to per-entry event-log metrics; disabled by default because log `id`/`message` labels are high-cardinality |
+| `collectors.event_log_limit` | `500`       | Maximum event-log entries exported per BMC snapshot; valid range 1–5,000 |
+| `collectors.bios_attributes` | `false`     | Opt in to full numeric/string BIOS attributes; `redfish_bios_pending_changes` remains enabled |
+| `collectors.bios_attribute_limit` | `10000` | Maximum BIOS attributes exported per BMC snapshot; valid range 1–10,000 |
 | `web`                    | `null`        | Inbound hardening: auth_token (>=16 chars), auth_token_file (mutually exclusive), tls_cert_file + tls_key_file (must be set together) |
 | `bmcs`                   | required      | Non-empty list of BMC entries                                    |
 | `bmcs[].name`            | required      | Unique name, used as the `bmc` metric label                      |
@@ -74,9 +78,10 @@ The duration defaults are starting points, not a latency guarantee. Measure a
 full slow-group round on every production model and leave margin above its
 observed tail latency. In the 0.1.0 release validation, a Dell PowerEdge R750
 completed comfortably within the defaults, while an IEIT/Inspur NF5280M6 with
-BMC firmware 7.18.00 and more than 2,000 event-log entries required
-`scrape_timeout: "180s"`; it was tested with `scrape_interval: "120s"` and
-`slow_interval: "900s"` to keep BMC request load bounded.
+BMC firmware 7.18.00 required `scrape_timeout: "180s"` in the opt-in full
+inventory profile containing more than 2,000 event-log entries; production was
+tested with `scrape_interval: "120s"` and `slow_interval: "900s"` to keep BMC
+request load bounded.
 
 ### Authentication
 
@@ -103,18 +108,19 @@ The full reference (every metric, its labels, help text and source Redfish resou
 | `redfish_memory_capacity_bytes`, `redfish_memory_bandwidth_percent`, `redfish_memory_correctable_errors`, `redfish_memory_uncorrectable_errors` | Memory metrics (capacity, bandwidth, ECC alarm trips) |
 | `redfish_drive_*`, `redfish_volume_capacity_bytes` | Storage metrics              |
 | `redfish_ethernet_interface_*`, `redfish_pcie_device_*` | Network metrics             |
-| `redfish_event_log_entry`                     | Event log entries (timestamp = creation time) |
-| `redfish_bios_attribute`, `redfish_bios_attribute_info`, `redfish_bios_pending_changes` | BIOS attributes and pending settings |
+| `redfish_event_log_entry`                     | Opt-in event log entries (timestamp = creation time; capped) |
+| `redfish_bios_attribute`, `redfish_bios_attribute_info` | Opt-in, capped BIOS attributes |
+| `redfish_bios_pending_changes`                | BIOS settings pending reboot (enabled by default) |
 
 Hardening additions (probe-gated on vendor OEM fields): `redfish_processor_frequency_mhz`, `redfish_processor_max_frequency_mhz`, `redfish_processor_voltage_volts`, `redfish_storage_controller_info`, `redfish_storage_controller_status`, `redfish_drive_info`, `redfish_drive_oem_status`, `redfish_indicator_led`.
 
-The table above is an overview only — [`docs/metrics.md`](docs/metrics.md) is the authoritative full catalog (53 metric names in 0.1.0, every metric with labels, help text and source Redfish resource).
+The table above is an overview only — [`docs/metrics.md`](docs/metrics.md) is the authoritative full catalog (53 metric names in 0.1.0, every metric with labels, help text and source Redfish resource). Event-log entries and full BIOS attributes are deliberately disabled by default: on the validated Inspur BMC they accounted for roughly 98% of all series. Enable them only for a bounded inventory/compliance use case and size Prometheus retention accordingly.
 
 ## Alerting
 
-Example Prometheus alert rules are provided in [`deploy/prometheus/redfish-alerts.yml`](deploy/prometheus/redfish-alerts.yml) (BMC unreachable, scrape errors, sensor thresholds, drive predictive failure, link down).
+Example Prometheus alert rules are provided in [`deploy/prometheus/redfish-alerts.yml`](deploy/prometheus/redfish-alerts.yml) (availability, current and transient scrape failures, component health, sensor thresholds, drive failure/life, memory ECC, BIOS pending changes, and link state).
 
-A Grafana dashboard for the exporter is provided in [`deploy/grafana/redfish-dashboard.json`](deploy/grafana/redfish-dashboard.json) (import via Grafana UI or provisioning), and a Prometheus `ServiceMonitor` for the Prometheus operator ships in [`deploy/kubernetes/service-monitor.yaml`](deploy/kubernetes/service-monitor.yaml).
+A 14-panel Grafana operations dashboard with a multi-BMC filter is provided in [`deploy/grafana/redfish-dashboard.json`](deploy/grafana/redfish-dashboard.json) (import via Grafana UI or provisioning), and a Prometheus `ServiceMonitor` for the Prometheus operator ships in [`deploy/kubernetes/service-monitor.yaml`](deploy/kubernetes/service-monitor.yaml).
 
 ## Security
 

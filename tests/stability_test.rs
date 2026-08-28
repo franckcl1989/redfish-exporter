@@ -2,7 +2,10 @@ use axum::{Router, routing::get};
 use nv_redfish::ServiceRoot;
 use nv_redfish_bmc_mock::{Bmc as MockBmc, Expect};
 use redfish_exporter::bmc::{BmcHandle, build_http_client, make_bmc};
-use redfish_exporter::config::{AuthMethod, BmcConfig, SecretString, StabilityConfig};
+use redfish_exporter::config::{
+    AuthMethod, BmcConfig, CollectorsConfig, SecretString, StabilityConfig,
+};
+use redfish_exporter::scraper::RoundOptions;
 use redfish_exporter::stability::{
     BmcState, RoundAction, RoundOutcome, next_backoff, on_round_result, round_action,
 };
@@ -17,6 +20,15 @@ fn cfg() -> StabilityConfig {
         cooldown_failures: 3,
         cooldown_base: Duration::from_secs(60),
         cooldown_max: Duration::from_secs(300),
+    }
+}
+
+fn round_options(attempt_session: bool, use_basic_only: bool) -> RoundOptions {
+    RoundOptions {
+        timeout: Duration::from_secs(5),
+        attempt_session,
+        use_basic_only,
+        collectors: CollectorsConfig::default(),
     }
 }
 
@@ -320,9 +332,7 @@ async fn fault_injection_401_only_server_degrades_then_cools() {
         None,
         &slow_state,
         &sessions,
-        Duration::from_secs(5),
-        true,
-        false,
+        round_options(true, false),
     )
     .await;
     assert!(o.report.is_none());
@@ -337,9 +347,7 @@ async fn fault_injection_401_only_server_degrades_then_cools() {
             None,
             &slow_state,
             &sessions,
-            Duration::from_secs(5),
-            false,
-            true,
+            round_options(false, true),
         )
         .await;
         assert!(o.report.is_none());
@@ -418,9 +426,7 @@ async fn fault_injection_session_401_basic_ok_degrades_with_mark() {
         None,
         &slow_state,
         &sessions,
-        Duration::from_secs(5),
-        true,
-        false,
+        round_options(true, false),
     )
     .await;
     assert!(o.report.is_none());
@@ -435,9 +441,7 @@ async fn fault_injection_session_401_basic_ok_degrades_with_mark() {
         None,
         &slow_state,
         &sessions,
-        Duration::from_secs(5),
-        false,
-        true,
+        round_options(false, true),
     )
     .await;
     assert!(o.report.is_some(), "round 2 message: {}", o.message);
@@ -528,9 +532,7 @@ async fn fault_injection_garbled_response_round_fails_then_cools() {
             None,
             &slow_state,
             &sessions,
-            Duration::from_secs(5),
-            true,
-            false,
+            round_options(true, false),
         )
         .await;
         assert!(o.report.is_none(), "garbled round must fail: {}", o.message);
@@ -567,9 +569,7 @@ async fn fault_injection_root_404_round_fails_then_cools() {
             None,
             &slow_state,
             &sessions,
-            Duration::from_secs(5),
-            true,
-            false,
+            round_options(true, false),
         )
         .await;
         assert!(

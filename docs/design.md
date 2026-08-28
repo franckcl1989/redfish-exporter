@@ -131,7 +131,7 @@ If either subsystem exits unexpectedly, main signals the other, waits up to 30 s
 - Optional bearer-token auth: when `web.auth_token`/`auth_token_file` is set, `/metrics` and `/info` require `Authorization: Bearer <token>`; comparison is constant-time and the authentication scheme is case-insensitive. `/healthz` and `/readyz` intentionally remain public and reveal status only. Configuration changes require a restart.
 - Optional server TLS: `serve()` loads a rustls config from `web.tls_cert_file`/`tls_key_file` (fail-fast on error) and serves via axum-server 0.8 (rustls); a 10s HTTP/1.1 header read timeout applies in both modes. The server is fixed to HTTP/1.1 so the timeout also covers zero-byte slow connections. Outbound redirects are limited to 10 hops and may not change scheme, host, or port.
 - Implementation note (Windows): `serve_on` sets the listener nonblocking before serving — blocking std listeners hang all accepted-connection I/O under IOCP.
-- Pagination defense caps: 64MiB per page (post-deserialization check; nv typed fetch has no streaming API), 1000 pages, 200k accumulated members — violations fail the affected log service (resource-level isolation).
+- Pagination defense caps: 64MiB per page (post-deserialization check; nv typed fetch has no streaming API), 1000 pages, 200k accumulated members — violations fail the affected collection (resource-level isolation). Opt-in event-log metrics use a separate successful-truncation path capped at 500 entries by default and 5,000 maximum.
 
 ## Config validation rules
 
@@ -144,10 +144,11 @@ From `config.rs` (`load_config`), applied in order:
 5. `listen_addr` must parse as a `SocketAddr`.
 6. `scrape_interval`, `scrape_timeout`, `request_timeout` must be non-zero (durations via `humantime`, e.g. `30s`).
 7. `slow_interval`, if set, must be non-zero.
-8. Defaults: `listen_addr=127.0.0.1:9417`, `scrape_interval=30s`, `scrape_timeout=15s`, `request_timeout=10s`, `slow_interval=null` (no frequency splitting), `auth=basic`, `insecure_skip_verify=false`, `ca_cert_file=null`.
+8. Defaults: `listen_addr=127.0.0.1:9417`, `scrape_interval=30s`, `scrape_timeout=15s`, `request_timeout=10s`, `slow_interval=null` (no frequency splitting), `auth=basic`, `insecure_skip_verify=false`, `ca_cert_file=null`. High-cardinality `collectors.event_logs` and `collectors.bios_attributes` default to false; BIOS pending state remains enabled.
 9. Client-level HTTP: request timeout from config, 5 s connect timeout, user agent `redfish-exporter/<version>`; `ca_cert_file` loads every certificate in a PEM bundle. HTTP BMCs may not specify TLS options, and `ca_cert_file` is mutually exclusive with `insecure_skip_verify`.
 10. Unknown YAML fields at every configuration level are rejected.
 11. `web` section: `auth_token` (>=16 chars) XOR `auth_token_file` (content trimmed, >=16 chars); `tls_cert_file` and `tls_key_file` must be set together; password overrides reject empty values and normalized-name collisions.
+12. High-cardinality limits are validated even while disabled: `event_log_limit` 1–5,000 and `bios_attribute_limit` 1–10,000.
 
 ## Metric naming conventions
 

@@ -67,7 +67,14 @@ async fn resource_memory_per_bmc_curve() {
         expect_full_round(&bmc);
         let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
         let fast = collect_fast(Arc::clone(&bmc), &root, &name).await.unwrap();
-        let slow = collect_slow(Arc::clone(&bmc), &root, &name).await.unwrap();
+        let slow = collect_slow(
+            Arc::clone(&bmc),
+            &root,
+            &name,
+            redfish_exporter::config::CollectorsConfig::all_enabled(),
+        )
+        .await
+        .unwrap();
         let merged = merge_reports(fast, Some(&slow));
         let report = finalize_report(
             &name,

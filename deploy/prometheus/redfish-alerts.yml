@@ -21,6 +21,32 @@ groups:
           summary: "Redfish scrape error on {{ $labels.bmc }}"
           description: "Resource {{ $labels.resource }} on BMC {{ $labels.bmc }} failed to be collected (redfish_scrape_error == 1)."
 
+      - alert: RedfishBMCScrapeErrorsIncreasing
+        expr: increase(redfish_scrape_errors_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redfish scrape errors increased on {{ $labels.bmc }}"
+          description: "BMC {{ $labels.bmc }} accumulated {{ $value | humanize }} failed resources in the last 15 minutes, including transient failures that may have recovered."
+
+      - alert: RedfishResourceCritical
+        expr: redfish_health_status{health="Critical"} == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical {{ $labels.resource_type }} health on {{ $labels.bmc }}"
+          description: "Resource {{ $labels.id }} on BMC {{ $labels.bmc }} reports Critical health and state {{ $labels.state }}."
+
+      - alert: RedfishResourceWarning
+        expr: redfish_health_status{health="Warning"} == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Warning {{ $labels.resource_type }} health on {{ $labels.bmc }}"
+          description: "Resource {{ $labels.id }} on BMC {{ $labels.bmc }} has reported Warning health for more than 10 minutes."
+
       - alert: RedfishSensorCritical
         expr: redfish_sensor_reading >= on(bmc, chassis, id) redfish_sensor_threshold_upper_critical
         for: 5m
@@ -39,11 +65,47 @@ groups:
           summary: "Drive {{ $labels.id }} on {{ $labels.bmc }} predicts failure"
           description: "Drive {{ $labels.id }} (storage {{ $labels.storage }}) on BMC {{ $labels.bmc }} reports a predicted failure in the near future."
 
+      - alert: RedfishDriveLifeLow
+        expr: redfish_drive_life_left_percent < 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Drive {{ $labels.id }} on {{ $labels.bmc }} has low remaining life"
+          description: "Drive {{ $labels.id }} (storage {{ $labels.storage }}) reports {{ $value | humanize }}% remaining media life."
+
+      - alert: RedfishMemoryUncorrectableECC
+        expr: redfish_memory_uncorrectable_errors == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Uncorrectable memory ECC alarm on {{ $labels.bmc }}"
+          description: "Memory resource {{ $labels.id }} on system {{ $labels.system }} reports an uncorrectable ECC alarm trip."
+
+      - alert: RedfishMemoryCorrectableECC
+        expr: redfish_memory_correctable_errors == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Correctable memory ECC alarm on {{ $labels.bmc }}"
+          description: "Memory resource {{ $labels.id }} on system {{ $labels.system }} reports a correctable ECC alarm trip."
+
+      - alert: RedfishBiosPendingChanges
+        expr: redfish_bios_pending_changes == 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BIOS changes are pending on {{ $labels.bmc }}"
+          description: "System {{ $labels.system }} has BIOS settings pending a reboot for more than 30 minutes."
+
       - alert: RedfishLinkDown
-        expr: redfish_ethernet_interface_link_status == 0
+        expr: (redfish_ethernet_interface_link_status == 0) and on(bmc, system, id) (max_over_time(redfish_ethernet_interface_link_status[24h]) == 1)
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "Ethernet link {{ $labels.id }} on {{ $labels.bmc }} is down"
-          description: "Ethernet interface {{ $labels.id }} on system {{ $labels.system }} of BMC {{ $labels.bmc }} has been down for more than 5 minutes."
+          description: "Ethernet interface {{ $labels.id }} on system {{ $labels.system }} of BMC {{ $labels.bmc }} was up during the last 24 hours and has now been down for more than 5 minutes."

@@ -62,7 +62,14 @@ async fn soak_healthy_mock_bmc() {
         let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
         let t0 = Instant::now();
         let fast = collect_fast(Arc::clone(&bmc), &root, "soak").await.unwrap();
-        let slow = collect_slow(Arc::clone(&bmc), &root, "soak").await.unwrap();
+        let slow = collect_slow(
+            Arc::clone(&bmc),
+            &root,
+            "soak",
+            redfish_exporter::config::CollectorsConfig::all_enabled(),
+        )
+        .await
+        .unwrap();
         let merged = merge_reports(fast, Some(&slow));
         let report = finalize_report("soak", merged.metrics, merged.failed_resources, t0);
         assert!(

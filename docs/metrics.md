@@ -4,6 +4,8 @@ Metrics are Gauges unless their name ends in `_total`; `_total` families are Pro
 
 Values are pushed on every scrape; labels whose source field is absent on the BMC are emitted as the empty string (or `unknown` for health/state). The Prometheus registry is rebuilt per BMC per round from the scrape snapshot.
 
+The default production profile excludes the two unbounded-cardinality data sets: per-entry event logs and full BIOS attributes. `redfish_event_log_entry`, `redfish_bios_attribute`, and `redfish_bios_attribute_info` require explicit `collectors` opt-ins and remain subject to per-BMC snapshot caps. `redfish_bios_pending_changes` is low-cardinality and stays enabled. On the validated IEIT/Inspur system, event logs plus BIOS attributes represented roughly 98% of the otherwise emitted series, so this default materially reduces Prometheus storage and churn without removing core hardware telemetry.
+
 ## Common labels
 
 | Label          | Meaning                                                        |
@@ -129,6 +131,8 @@ The `redfish_drive_io_*_errors_total` and `redfish_scrape_errors_total` families
 
 ### Event log
 
+This collector is disabled by default. Set `collectors.event_logs: true` to enable it. `collectors.event_log_limit` defaults to 500 entries per BMC snapshot and is hard-limited to 5,000. Pagination stops successfully at the configured cap; a warning is logged instead of marking an otherwise healthy BMC down.
+
 | Metric                    | Labels                                       | Help text from code                                            | Source |
 |---------------------------|----------------------------------------------|----------------------------------------------------------------|--------|
 | `redfish_event_log_entry` | `bmc`, `manager`, `service`, `severity`, `message`, `id` | Event log entry, value is the entry creation time as a Unix timestamp | `LogService.Entries` members (`logs.rs`), fetched with the pagination walker (`Members@odata.nextLink`); slow group |
@@ -136,6 +140,8 @@ The `redfish_drive_io_*_errors_total` and `redfish_scrape_errors_total` families
 `severity` is the `LogEntry.Severity` label mapping (`OK` / `Warning` / `Critical`, unknown variants exposed as `UnsupportedValue`; empty when absent, e.g. Inspur AuditLog); `message` is the `LogEntry.Message` text (empty when absent). Entries without a parseable `Created` timestamp are skipped. Series are stale-prone (log entries are not deleted by the exporter), so alerts should use `changes()`-style PromQL rather than `absent()`.
 
 ### BIOS
+
+`redfish_bios_pending_changes` is always collected. Full attributes are disabled by default; set `collectors.bios_attributes: true` to enable them. `collectors.bios_attribute_limit` defaults to, and cannot exceed, 10,000 attributes per BMC snapshot. When a limit is reached, attributes are selected in deterministic name order to avoid series churn.
 
 | Metric                            | Labels                     | Help text from code                   | Source |
 |-----------------------------------|----------------------------|---------------------------------------|--------|

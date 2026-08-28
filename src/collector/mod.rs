@@ -9,6 +9,7 @@ pub mod sensors;
 pub mod storage;
 pub mod systems;
 
+use crate::config::CollectorsConfig;
 use crate::metrics::{HEALTH_STATUS, INFO, Metric, SCRAPE_DURATION, UP, health_state_labels};
 use nv_redfish::schema::resource::{Health, Status};
 use nv_redfish::{Bmc, ServiceRoot};
@@ -174,6 +175,7 @@ pub async fn collect_slow<B: Bmc>(
     bmc: Arc<B>,
     root: &ServiceRoot<B>,
     bmc_name: &str,
+    collectors: CollectorsConfig,
 ) -> Result<ScrapeReport, String> {
     let mut metrics = Vec::new();
     let mut failed_resources = Vec::new();
@@ -218,20 +220,33 @@ pub async fn collect_slow<B: Bmc>(
         Ok(m) => metrics.extend(m),
         Err(resource) => failed_resources.push(resource),
     }
-    match timed(
-        "event_logs",
-        bmc_name,
-        logs::collect_event_logs(Arc::clone(&bmc), root, bmc_name),
-    )
-    .await
-    {
-        Ok(m) => metrics.extend(m),
-        Err(resource) => failed_resources.push(resource),
+    if collectors.event_logs {
+        match timed(
+            "event_logs",
+            bmc_name,
+            logs::collect_event_logs_with_limit(
+                Arc::clone(&bmc),
+                root,
+                bmc_name,
+                collectors.event_log_limit,
+            ),
+        )
+        .await
+        {
+            Ok(m) => metrics.extend(m),
+            Err(resource) => failed_resources.push(resource),
+        }
     }
     match timed(
         "bios",
         bmc_name,
-        bios::collect_bios(Arc::clone(&bmc), root, bmc_name),
+        bios::collect_bios_configured(
+            Arc::clone(&bmc),
+            root,
+            bmc_name,
+            collectors.bios_attributes,
+            collectors.bios_attribute_limit,
+        ),
     )
     .await
     {

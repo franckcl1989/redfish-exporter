@@ -67,7 +67,14 @@ async fn perf_benchmark_mock_pipeline() {
         let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
         let t0 = Instant::now();
         let fast = collect_fast(Arc::clone(&bmc), &root, "perf").await.unwrap();
-        let slow = collect_slow(Arc::clone(&bmc), &root, "perf").await.unwrap();
+        let slow = collect_slow(
+            Arc::clone(&bmc),
+            &root,
+            "perf",
+            redfish_exporter::config::CollectorsConfig::all_enabled(),
+        )
+        .await
+        .unwrap();
         let merged = merge_reports(fast, Some(&slow));
         let report = finalize_report("perf", merged.metrics, merged.failed_resources, t0);
         assert!(report.failed_resources.is_empty());

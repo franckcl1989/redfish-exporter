@@ -18,6 +18,11 @@ data:
     scrape_interval: "30s"
     scrape_timeout: "15s"
     request_timeout: "10s"
+    collectors:
+      event_logs: false
+      event_log_limit: 500
+      bios_attributes: false
+      bios_attribute_limit: 10000
     bmcs:
       - name: bmc1
         host: https://10.0.0.1

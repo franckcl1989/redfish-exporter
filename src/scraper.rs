@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use crate::bmc::{BmcHandle, build_http_client, establish_session, is_unauthorized, make_bmc};
 use crate::collector::error::ConcreteBmc;
 use crate::collector::{ScrapeReport, collect_fast, collect_slow, finalize_report, merge_reports};
-use crate::config::{AuthMethod, Config, StabilityConfig};
+use crate::config::{AuthMethod, CollectorsConfig, Config, StabilityConfig};
 use crate::metrics::{Metric, SCRAPE_ERROR, UP};
 use crate::recover_lock;
 use crate::registry::{Snapshot, build_registry};
@@ -28,6 +28,14 @@ type SlowState = Arc<Mutex<HashMap<String, (Instant, Option<ScrapeReport>)>>>;
 /// 已建立会话（仅 session 认证 BMC），shutdown 时删除。
 type SessionStore = Arc<Mutex<HashMap<String, Option<Arc<ConcreteSession>>>>>;
 
+#[derive(Clone, Copy, Debug)]
+pub struct RoundOptions {
+    pub timeout: Duration,
+    pub attempt_session: bool,
+    pub use_basic_only: bool,
+    pub collectors: CollectorsConfig,
+}
+
 pub struct Scraper {
     bmcs: Vec<BmcHandle>,
     interval: Duration,
@@ -38,6 +46,7 @@ pub struct Scraper {
     snapshot: Arc<Snapshot>,
     /// 自适应调度配置（冷却阈值与退避上下界）。
     stability: StabilityConfig,
+    collectors: CollectorsConfig,
     /// per-BMC 稳定性状态（Healthy/SessionDegraded/Cooling），跨轮累计。
     states: HashMap<String, BmcState>,
 }
@@ -62,6 +71,7 @@ impl Scraper {
             sessions,
             snapshot,
             stability: cfg.stability.clone(),
+            collectors: cfg.collectors,
             states: HashMap::new(),
         })
     }
@@ -112,6 +122,7 @@ impl Scraper {
         let timeout = self.timeout;
         let slow_interval = self.slow_interval;
         let stability = self.stability.clone();
+        let collectors = self.collectors;
         let slow_state = Arc::clone(&self.slow_state);
         let sessions = Arc::clone(&self.sessions);
         let now = Instant::now();
@@ -145,9 +156,12 @@ impl Scraper {
                     slow_interval,
                     &slow_state,
                     &sessions,
-                    timeout,
-                    attempt_session,
-                    use_basic_only,
+                    RoundOptions {
+                        timeout,
+                        attempt_session,
+                        use_basic_only,
+                        collectors,
+                    },
                 )
                 .await;
                 (handle.name.clone(), outcome)
@@ -324,10 +338,14 @@ pub async fn run_bmc_round(
     slow_interval: Option<Duration>,
     slow_state: &SlowState,
     sessions: &SessionStore,
-    timeout: Duration,
-    attempt_session: bool,
-    use_basic_only: bool,
+    options: RoundOptions,
 ) -> RoundOutcome {
+    let RoundOptions {
+        timeout,
+        attempt_session,
+        use_basic_only,
+        collectors,
+    } = options;
     let name = handle.name.clone();
     let bmc = Arc::clone(&handle.bmc);
     let username = handle.username.clone();
@@ -370,6 +388,7 @@ pub async fn run_bmc_round(
         slow_interval,
         Arc::clone(slow_state),
         timeout,
+        collectors,
     )
     .await
     {
@@ -400,6 +419,7 @@ pub async fn run_bmc_round(
                         slow_interval,
                         Arc::clone(slow_state),
                         timeout,
+                        collectors,
                     )
                     .await
                     {
@@ -449,6 +469,7 @@ async fn collect_round(
     slow_interval: Option<Duration>,
     slow_state: SlowState,
     timeout: Duration,
+    collectors: CollectorsConfig,
 ) -> Result<ScrapeReport, nv_redfish::Error<ConcreteBmc>> {
     // A missing ServiceRoot is a failed BMC round, not a successful empty
     // scrape. Propagating every root error ensures error accounting, alerts,
@@ -477,7 +498,11 @@ async fn collect_round(
     let mut slow_report = cache.as_ref().and_then(|(_, r)| r.clone());
     let mut slow_failed = Vec::new();
     if slow_due(cache.as_ref().map(|(t, _)| *t), slow_interval) {
-        let result = match with_deadline(timeout, collect_slow(Arc::clone(&bmc), &root, name)).await
+        let result = match with_deadline(
+            timeout,
+            collect_slow(Arc::clone(&bmc), &root, name, collectors),
+        )
+        .await
         {
             Some(r) => r,
             None => {

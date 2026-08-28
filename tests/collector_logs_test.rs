@@ -1,6 +1,6 @@
 use nv_redfish::ServiceRoot;
 use nv_redfish_bmc_mock::{Bmc as MockBmc, Expect};
-use redfish_exporter::collector::logs::collect_event_logs;
+use redfish_exporter::collector::logs::{collect_event_logs, collect_event_logs_with_limit};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -133,6 +133,36 @@ async fn collects_event_log_entries_across_pages() {
         })
         .collect();
     assert_eq!(severities, vec![Some("Critical"), Some("OK")]);
+}
+
+#[tokio::test]
+async fn event_log_limit_stops_before_the_next_page() {
+    let bmc = Arc::new(Mock::default());
+    common_expects(&bmc);
+    bmc.expect(Expect::get(
+        ENTRIES,
+        json!({
+            "@odata.id": ENTRIES,
+            "Name": "Entries",
+            "Members": [
+                entry_json("2", "2026-08-01T12:00:00Z", "newest", "Critical"),
+                entry_json("1", "2026-08-01T11:00:00Z", "older", "Warning")
+            ],
+            "Members@odata.nextLink": format!("{ENTRIES}?$skip=2")
+        }),
+    ));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_event_logs_with_limit(bmc, &root, "bmc1", 1)
+        .await
+        .unwrap();
+    assert_eq!(metrics.len(), 1);
+    let labels = metrics[0]
+        .labels
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(labels["message"], "newest");
 }
 
 #[tokio::test]

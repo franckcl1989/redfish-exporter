@@ -1,6 +1,6 @@
 use nv_redfish::ServiceRoot;
 use nv_redfish_bmc_mock::{Bmc as MockBmc, Expect};
-use redfish_exporter::collector::bios::collect_bios;
+use redfish_exporter::collector::bios::{collect_bios, collect_bios_configured};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -159,6 +159,43 @@ async fn no_settings_no_pending_changes() {
         .find(|m| m.name == "redfish_bios_pending_changes")
         .unwrap();
     assert_eq!(pending.value, 0.0);
+}
+
+#[tokio::test]
+async fn safe_profile_keeps_pending_state_without_exporting_attributes() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, true);
+    expect_bios(&bmc, true, json!({ "BootMode": "Uefi", "MaxCores": 16 }));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_bios_configured(bmc, &root, "bmc1", false, 10_000)
+        .await
+        .unwrap();
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0].name, "redfish_bios_pending_changes");
+    assert_eq!(metrics[0].value, 1.0);
+}
+
+#[tokio::test]
+async fn bios_attribute_limit_is_deterministic() {
+    let bmc = Arc::new(Mock::default());
+    expect_service_root(&bmc);
+    expect_systems_collection(&bmc);
+    expect_system(&bmc, true);
+    expect_bios(&bmc, false, json!({ "Zulu": 3, "Alpha": 1, "Bravo": 2 }));
+
+    let root = ServiceRoot::new(Arc::clone(&bmc)).await.unwrap();
+    let metrics = collect_bios_configured(bmc, &root, "bmc1", true, 2)
+        .await
+        .unwrap();
+    let attributes = metrics
+        .iter()
+        .filter(|metric| metric.name == "redfish_bios_attribute")
+        .map(|metric| labels_of(metric)["attribute"])
+        .collect::<Vec<_>>();
+    assert_eq!(attributes, ["Alpha", "Bravo"]);
 }
 
 #[tokio::test]
