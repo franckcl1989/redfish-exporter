@@ -146,6 +146,8 @@ fn deployment_and_release_hardening_invariants_are_pinned() {
         "sbom: true",
         "Attest container image",
         "imagetools inspect",
+        "org.opencontainers.image.revision=${{ steps.source.outputs.commit }}",
+        "docker inspect --format",
     ] {
         assert!(
             repair.contains(required),
