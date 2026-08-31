@@ -74,9 +74,9 @@ gh workflow run repair-release-container.yml -f tag=v0.1.0
 The workflow checks out that exact tag, verifies that the tag points at `HEAD`
 and matches `Cargo.toml`, smoke-tests the rebuilt image, publishes semver tags
 with BuildKit provenance and SBOM attestations, adds the GitHub registry
-attestation, and verifies that the pushed digest resolves. Publish the draft
-release only after this workflow and the downloaded asset/attestation checks
-all succeed.
+attestation, and verifies that the pushed digest resolves and carries the exact
+tagged source commit in its OCI revision label. Publish the draft release only
+after this workflow and the downloaded asset/attestation checks all succeed.
 
 ## Rollback
 
