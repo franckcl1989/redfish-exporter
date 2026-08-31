@@ -127,6 +127,31 @@ fn deployment_and_release_hardening_invariants_are_pinned() {
     }
     assert!(release.contains("artifact-metadata: write"));
     assert!(release.contains("CHANGELOG.md config.example.yaml"));
+    assert!(
+        release.contains("docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e")
+    );
+    let image_push = release.find("Build and push container image").unwrap();
+    let image_attestation = release.find("Attest container image").unwrap();
+    let public_release = release.find("Create GitHub Release").unwrap();
+    assert!(image_push < image_attestation);
+    assert!(image_attestation < public_release);
+
+    let repair = include_str!("../.github/workflows/repair-release-container.yml");
+    for required in [
+        "workflow_dispatch:",
+        "ref: ${{ inputs.tag }}",
+        "Validate immutable tag and version",
+        "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e",
+        "provenance: mode=max",
+        "sbom: true",
+        "Attest container image",
+        "imagetools inspect",
+    ] {
+        assert!(
+            repair.contains(required),
+            "missing repair workflow invariant: {required}"
+        );
+    }
 }
 
 #[test]
@@ -134,6 +159,10 @@ fn every_github_action_reference_is_an_immutable_commit() {
     for (name, workflow) in [
         ("ci", include_str!("../.github/workflows/ci.yml")),
         ("release", include_str!("../.github/workflows/release.yml")),
+        (
+            "repair-release-container",
+            include_str!("../.github/workflows/repair-release-container.yml"),
+        ),
     ] {
         let mut references = 0;
         for line in workflow.lines() {

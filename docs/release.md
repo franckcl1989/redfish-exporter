@@ -59,6 +59,25 @@ canary BMC group, verify at least two complete scrape intervals plus the alerts
 and readiness probe, then expand gradually. The 15-minute release gate is not a
 substitute for post-deployment memory, cardinality, and BMC-load monitoring.
 
+## Partial-release recovery
+
+The normal release workflow creates the public GitHub Release only after the
+container image has been pushed and its registry attestation succeeds. If an
+older run has already uploaded valid binary assets but fails only while
+publishing the container, keep the release as a draft and do not move or
+recreate the immutable tag. Run the narrowly scoped recovery workflow instead:
+
+```bash
+gh workflow run repair-release-container.yml -f tag=v0.1.0
+```
+
+The workflow checks out that exact tag, verifies that the tag points at `HEAD`
+and matches `Cargo.toml`, smoke-tests the rebuilt image, publishes semver tags
+with BuildKit provenance and SBOM attestations, adds the GitHub registry
+attestation, and verifies that the pushed digest resolves. Publish the draft
+release only after this workflow and the downloaded asset/attestation checks
+all succeed.
+
 ## Rollback
 
 If the canary loses expected series, creates sustained scrape errors, increases
